@@ -695,9 +695,6 @@ export default function App() {
                     isLiveSupabase ? 'bg-purple-600 animate-pulse' : 'bg-amber-500'
                   }`}
                 />
-                <span className="text-slate-500">
-                  {isLiveSupabase ? 'Supabase Connected' : 'Local Preview Mode'}
-                </span>
               </div>
             </div>
           </div>
