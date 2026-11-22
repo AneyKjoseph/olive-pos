@@ -76,79 +76,10 @@ CREATE POLICY "Allow all operations on items" ON items FOR ALL USING (true) WITH
 CREATE POLICY "Allow all operations on bills" ON bills FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all operations on bill_items" ON bill_items FOR ALL USING (true) WITH CHECK (true);`;
 
-const INITIAL_CATEGORIES = [
-  { id: 'cat-1', name: 'Beverages', expense_percentage: 18 },
-  { id: 'cat-2', name: 'Snacks & Bakery', expense_percentage: 22.5 },
-  { id: 'cat-3', name: 'Groceries', expense_percentage: 12 },
-  { id: 'cat-4', name: 'Dairy & Fresh', expense_percentage: 25 }
-];
-
-const INITIAL_ITEMS = [
-  { id: 'item-1', name: 'Artisan Cold Brew Coffee', category_id: 'cat-1', price: 140, stock: 45 },
-  { id: 'item-2', name: 'Fresh Valencia Orange Juice', category_id: 'cat-1', price: 95, stock: 30 },
-  { id: 'item-3', name: 'Masala Chai Premix (250g)', category_id: 'cat-1', price: 210, stock: 22 },
-  { id: 'item-4', name: 'Sourdough Garlic Croissant', category_id: 'cat-2', price: 110, stock: 18 },
-  { id: 'item-5', name: 'Roasted Almonds Pack (200g)', category_id: 'cat-2', price: 260, stock: 40 },
-  { id: 'item-6', name: 'Organic Basmati Rice (1kg)', category_id: 'cat-3', price: 165, stock: 60 },
-  { id: 'item-7', name: 'Cold Pressed Olive Oil (500ml)', category_id: 'cat-3', price: 540, stock: 15 },
-  { id: 'item-8', name: 'Greek Yogurt Natural (400g)', category_id: 'cat-4', price: 120, stock: 25 }
-];
-
-const createInitialBills = () => {
-  const now = new Date();
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  const threeDaysAgo = new Date(now);
-  threeDaysAgo.setDate(now.getDate() - 3);
-
-  return [
-    {
-      id: 'bill-101',
-      bill_number: 'INV-2026-0841',
-      total_amount: 530,
-      created_at: new Date(now.getTime() - 1000 * 60 * 45).toISOString(),
-      items: [
-        { item_id: 'item-1', item_name: 'Artisan Cold Brew Coffee', category_name: 'Beverages', quantity: 2, unit_price: 140, subtotal: 280 },
-        { item_id: 'item-4', item_name: 'Sourdough Garlic Croissant', category_name: 'Snacks & Bakery', quantity: 1, unit_price: 110, subtotal: 110 },
-        { item_id: 'item-1', item_name: 'Artisan Cold Brew Coffee', category_name: 'Beverages', quantity: 1, unit_price: 140, subtotal: 140 }
-      ]
-    },
-    {
-      id: 'bill-102',
-      bill_number: 'INV-2026-0842',
-      total_amount: 945,
-      created_at: new Date(now.getTime() - 1000 * 60 * 15).toISOString(),
-      items: [
-        { item_id: 'item-7', item_name: 'Cold Pressed Olive Oil (500ml)', category_name: 'Groceries', quantity: 1, unit_price: 540, subtotal: 540 },
-        { item_id: 'item-6', item_name: 'Organic Basmati Rice (1kg)', category_name: 'Groceries', quantity: 1, unit_price: 165, subtotal: 165 },
-        { item_id: 'item-8', item_name: 'Greek Yogurt Natural (400g)', category_name: 'Dairy & Fresh', quantity: 2, unit_price: 120, subtotal: 240 }
-      ]
-    },
-    {
-      id: 'bill-100',
-      bill_number: 'INV-2026-0839',
-      total_amount: 780,
-      created_at: yesterday.toISOString(),
-      items: [
-        { item_id: 'item-5', item_name: 'Roasted Almonds Pack (200g)', category_name: 'Snacks & Bakery', quantity: 3, unit_price: 260, subtotal: 780 }
-      ]
-    },
-    {
-      id: 'bill-099',
-      bill_number: 'INV-2026-0835',
-      total_amount: 630,
-      created_at: threeDaysAgo.toISOString(),
-      items: [
-        { item_id: 'item-3', item_name: 'Masala Chai Premix (250g)', category_name: 'Beverages', quantity: 3, unit_price: 210, subtotal: 630 }
-      ]
-    }
-  ];
-};
-
 class SupabaseService {
   constructor(url, anonKey) {
-    this.url = url?.replace(/\/$/, '');
-    this.key = anonKey;
+    this.url = url?.trim().replace(/\/rest\/v1\/?$/i, '').replace(/\/$/, '');
+    this.key = anonKey?.trim();
   }
 
   isConfigured() {
@@ -180,10 +111,22 @@ export default function App() {
   const [activeRole, setActiveRole] = useState('sales');
   const [adminTab, setAdminTab] = useState('analytics');
 
-  // Admin Authentication State
+  // Admin Authentication State (Supports VITE_ADMIN_USER & VITE_ADMIN_PASSWORD from .env)
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [adminUserInput, setAdminUserInput] = useState('');
   const [adminLoginInput, setAdminLoginInput] = useState('');
   const [adminLoginError, setAdminLoginError] = useState('');
+  const [adminUsername] = useState(() => {
+    try {
+      return (
+        (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_USER) ||
+        localStorage.getItem('olive_pos_admin_user') ||
+        'admin'
+      );
+    } catch {
+      return localStorage.getItem('olive_pos_admin_user') || 'admin';
+    }
+  });
   const [adminPassword, setAdminPassword] = useState(() => {
     try {
       return (
@@ -216,9 +159,9 @@ export default function App() {
   const [isLiveSupabase, setIsLiveSupabase] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  const [categories, setCategories] = useState(INITIAL_CATEGORIES);
-  const [items, setItems] = useState(INITIAL_ITEMS);
-  const [bills, setBills] = useState(createInitialBills);
+  const [categories, setCategories] = useState([]);
+  const [items, setItems] = useState([]);
+  const [bills, setBills] = useState([]);
 
   const [cart, setCart] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -226,7 +169,7 @@ export default function App() {
   const [latestGeneratedBill, setLatestGeneratedBill] = useState(null);
 
   const [newItemName, setNewItemName] = useState('');
-  const [newItemCategory, setNewItemCategory] = useState('cat-1');
+  const [newItemCategory, setNewItemCategory] = useState('');
   const [newItemPrice, setNewItemPrice] = useState('');
   const [newItemStock, setNewItemStock] = useState('');
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -244,13 +187,17 @@ export default function App() {
 
   const handleAdminLogin = (e) => {
     e.preventDefault();
-    if (adminLoginInput === adminPassword) {
+    if (
+      adminUserInput.trim().toLowerCase() === adminUsername.trim().toLowerCase() &&
+      adminLoginInput === adminPassword
+    ) {
       setIsAdminAuthenticated(true);
+      setAdminUserInput('');
       setAdminLoginInput('');
       setAdminLoginError('');
-      showToast('Admin access unlocked!');
+      showToast(`Welcome back, ${adminUsername}! Admin access unlocked.`);
     } else {
-      setAdminLoginError('Invalid admin passcode. Please try again.');
+      setAdminLoginError('Invalid admin username or passcode. Please try again.');
     }
   };
 
@@ -544,6 +491,9 @@ export default function App() {
           expense_percentage: expPct
         };
         setCategories((prev) => [...prev, created]);
+        if (!newItemCategory) {
+          setNewItemCategory(created.id);
+        }
       }
       setNewCategoryName('');
       setNewCategoryExpense('15');
@@ -687,7 +637,6 @@ export default function App() {
             <div>
               <h1 className="font-bold text-base sm:text-lg tracking-tight text-purple-950 flex items-center gap-2">
                 Olive Cakes
-            
               </h1>
               <div className="flex items-center gap-2 text-xs">
                 <span
@@ -786,6 +735,16 @@ export default function App() {
               </div>
             </div>
 
+            {/* Product Grid */}
+            {visiblePosItems.length === 0 ? (
+              <div className="bg-white border border-dashed border-purple-200 rounded-2xl p-12 text-center">
+                <Package className="w-10 h-10 text-purple-300 mx-auto mb-3" />
+                <p className="text-sm font-semibold text-slate-700">No items available</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  Log into the Admin Panel to create categories and add inventory items.
+                </p>
+              </div>
+            ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
               {visiblePosItems.map((item) => {
                 const cat = categories.find((c) => c.id === item.category_id);
@@ -846,6 +805,7 @@ export default function App() {
                 );
               })}
             </div>
+            )}
           </div>
 
           <div className="lg:col-span-5 xl:col-span-4 space-y-5">
@@ -1004,31 +964,54 @@ export default function App() {
               </div>
               <h2 className="text-xl font-bold text-purple-950">Admin Access Required</h2>
               <p className="text-xs text-slate-500">
-                Enter your Admin passcode to view sales reports, category expenses, and inventory controls.
+                Sign in with your Admin credentials to view sales reports, category expenses, and inventory controls.
               </p>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                Admin Passcode
-              </label>
-              <div className="relative">
-                <KeyRound className="w-4 h-4 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="password"
-                  required
-                  autoFocus
-                  placeholder="Enter passcode (default: admin123)"
-                  value={adminLoginInput}
-                  onChange={(e) => {
-                    setAdminLoginInput(e.target.value);
-                    if (adminLoginError) setAdminLoginError('');
-                  }}
-                  className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
-                />
+            <div className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
+                  Admin Username
+                </label>
+                <div className="relative">
+                  <UserCheck className="w-4 h-4 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    placeholder="Enter admin username (default: admin)"
+                    value={adminUserInput}
+                    onChange={(e) => {
+                      setAdminUserInput(e.target.value);
+                      if (adminLoginError) setAdminLoginError('');
+                    }}
+                    className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
+                  />
+                </div>
               </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
+                  Admin Passcode
+                </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="password"
+                    required
+                    placeholder="Enter passcode (default: admin123)"
+                    value={adminLoginInput}
+                    onChange={(e) => {
+                      setAdminLoginInput(e.target.value);
+                      if (adminLoginError) setAdminLoginError('');
+                    }}
+                    className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
+                  />
+                </div>
+              </div>
+
               {adminLoginError && (
-                <p className="text-xs text-rose-600 font-medium mt-1.5 flex items-center gap-1">
+                <p className="text-xs text-rose-600 font-medium flex items-center gap-1">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                   {adminLoginError}
                 </p>
