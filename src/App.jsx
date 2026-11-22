@@ -680,16 +680,6 @@ export default function App() {
                 <span>Admin Panel</span>
               </button>
             </div>
-
-            {isAdminAuthenticated && (
-              <button
-                onClick={() => setShowSetupModal(true)}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-purple-50 text-purple-900 text-xs sm:text-sm font-medium border border-purple-200 transition-colors shadow-xs"
-              >
-                <Database className="w-4 h-4 text-purple-600" />
-                <span className="hidden md:inline">Supabase Setup</span>
-              </button>
-            )}
           </div>
         </div>
       </header>
@@ -999,7 +989,7 @@ export default function App() {
                   <input
                     type="password"
                     required
-                    placeholder="Enter passcode (default: admin123)"
+                    placeholder="Enter password"
                     value={adminLoginInput}
                     onChange={(e) => {
                       setAdminLoginInput(e.target.value);
@@ -1065,25 +1055,6 @@ export default function App() {
               </button>
             </div>
 
-            <div className="flex items-center gap-2">
-              {isLiveSupabase && (
-                <button
-                  onClick={() => syncFromSupabase(false)}
-                  disabled={isSyncing}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 text-xs font-semibold text-purple-800 border border-purple-200"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                  Refresh DB
-                </button>
-              )}
-              <button
-                onClick={handleAdminLogout}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-xs font-semibold text-rose-700 border border-rose-200 transition-colors"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                Lock Admin
-              </button>
-            </div>
           </div>
 
           {adminTab === 'analytics' && (
@@ -1404,37 +1375,6 @@ export default function App() {
                   </button>
                 </form>
 
-                <form
-                  onSubmit={handleUpdateAdminPassword}
-                  className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-4"
-                >
-                  <div className="flex items-center gap-2 text-purple-950 font-bold">
-                    <KeyRound className="w-5 h-5 text-purple-600" />
-                    <h3>Change Admin Passcode</h3>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      New Passcode (min 4 characters)
-                    </label>
-                    <input
-                      type="password"
-                      required
-                      minLength={4}
-                      placeholder="Enter new admin passcode"
-                      value={newAdminPasswordInput}
-                      onChange={(e) => setNewAdminPasswordInput(e.target.value)}
-                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full py-2.5 px-4 rounded-xl bg-purple-900 hover:bg-purple-800 text-white font-semibold text-sm transition-colors"
-                  >
-                    Update Passcode
-                  </button>
-                </form>
               </div>
 
               <div className="lg:col-span-8 bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
