@@ -1,5 +1,3 @@
--- Run this entire script in your Supabase Dashboard -> SQL Editor
-
 -- 1. Categories Table (Stores category names & Admin-configured expense percentages)
 CREATE TABLE IF NOT EXISTS categories (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -18,13 +16,16 @@ CREATE TABLE IF NOT EXISTS items (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. Bills Table (Stores generated bills with timestamp)
+-- 3. Bills Table (Stores generated bills with timestamp & payment method)
 CREATE TABLE IF NOT EXISTS bills (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   bill_number TEXT UNIQUE NOT NULL,
   total_amount NUMERIC(10,2) NOT NULL,
+  payment_method TEXT NOT NULL DEFAULT 'Cash' CHECK (payment_method IN ('Cash', 'UPI')),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'Cash';
 
 -- 4. Bill Items Table (Line items for category-wise daily/weekly analytics)
 CREATE TABLE IF NOT EXISTS bill_items (
@@ -39,33 +40,33 @@ CREATE TABLE IF NOT EXISTS bill_items (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 5. App Users Table (Stores Admin & Staff login credentials in DB)
+CREATE TABLE IF NOT EXISTS app_users (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  password TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'staff')),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Enable Row Level Security (RLS) with open policies for POS terminals
 ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bill_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_users ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Allow all operations on categories" ON categories;
 CREATE POLICY "Allow all operations on categories" ON categories FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all operations on items" ON items;
 CREATE POLICY "Allow all operations on items" ON items FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all operations on bills" ON bills;
 CREATE POLICY "Allow all operations on bills" ON bills FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all operations on bill_items" ON bill_items;
 CREATE POLICY "Allow all operations on bill_items" ON bill_items FOR ALL USING (true) WITH CHECK (true);
 
--- Seed Initial Categories
-INSERT INTO categories (name, expense_percentage) VALUES
-  ('Beverages', 18.00),
-  ('Snacks & Bakery', 22.50),
-  ('Groceries', 12.00),
-  ('Dairy & Fresh', 25.00)
-ON CONFLICT (name) DO NOTHING;
-
--- Seed Initial Sample Items
-INSERT INTO items (name, category_id, price, stock)
-SELECT 'Artisan Cold Brew Coffee', id, 140.00, 45 FROM categories WHERE name = 'Beverages'
-UNION ALL
-SELECT 'Fresh Valencia Orange Juice', id, 95.00, 30 FROM categories WHERE name = 'Beverages'
-UNION ALL
-SELECT 'Sourdough Garlic Croissant', id, 110.00, 18 FROM categories WHERE name = 'Snacks & Bakery'
-UNION ALL
-SELECT 'Organic Basmati Rice (1kg)', id, 165.00, 60 FROM categories WHERE name = 'Groceries'
-UNION ALL
-SELECT 'Greek Yogurt Natural (400g)', id, 120.00, 25 FROM categories WHERE name = 'Dairy & Fresh';
+DROP POLICY IF EXISTS "Allow all operations on app_users" ON app_users;
+CREATE POLICY "Allow all operations on app_users" ON app_users FOR ALL USING (true) WITH CHECK (true);

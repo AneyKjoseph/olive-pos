@@ -16,16 +16,15 @@ import {
   TrendingUp,
   Percent,
   Search,
-  RefreshCw,
-  Copy,
-  Check,
   Layers,
   IndianRupee,
   Lock,
   LogOut,
   KeyRound,
   Banknote,
-  QrCode
+  QrCode,
+  Users,
+  UserPlus
 } from 'lucide-react';
 
 const SUPABASE_SQL_SCHEMA = `-- 1. Categories Table (Stores category names & Admin-configured expense percentages)
@@ -70,16 +69,36 @@ CREATE TABLE IF NOT EXISTS bill_items (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- 5. App Users Table (Stores Admin & Staff login credentials in DB)
+CREATE TABLE IF NOT EXISTS app_users (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  password TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'staff')),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Enable Row Level Security (RLS) with open policies for POS terminals
 ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bill_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_users ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Allow all operations on categories" ON categories;
 CREATE POLICY "Allow all operations on categories" ON categories FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all operations on items" ON items;
 CREATE POLICY "Allow all operations on items" ON items FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all operations on bills" ON bills;
 CREATE POLICY "Allow all operations on bills" ON bills FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow all operations on bill_items" ON bill_items FOR ALL USING (true) WITH CHECK (true);`;
+
+DROP POLICY IF EXISTS "Allow all operations on bill_items" ON bill_items;
+CREATE POLICY "Allow all operations on bill_items" ON bill_items FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow all operations on app_users" ON app_users;
+CREATE POLICY "Allow all operations on app_users" ON app_users FOR ALL USING (true) WITH CHECK (true);`;
 
 class SupabaseService {
   constructor(url, anonKey) {
@@ -123,25 +142,11 @@ export default function App() {
   const [loginPassInput, setLoginPassInput] = useState('');
   const [loginError, setLoginError] = useState('');
 
-  const envAdminUser = useMemo(() => {
-    try {
-      return (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_USER) || 'admin';
-    } catch {
-      return 'admin';
-    }
-  }, []);
-
-  const envAdminPass = useMemo(() => {
-    try {
-      return (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_PASSWORD) || 'admin123';
-    } catch {
-      return 'admin123';
-    }
-  }, []);
-
-  const [adminUsername, setAdminUsername] = useState(() => localStorage.getItem('olive_pos_admin_user') || envAdminUser);
-  const [adminPassword, setAdminPassword] = useState(() => localStorage.getItem('olive_pos_admin_pass') || envAdminPass);
-  const [newAdminPassInput, setNewAdminPassInput] = useState('');
+  const [currentLoggedInUser, setCurrentLoggedInUser] = useState(null);
+  const [dbUsers, setDbUsers] = useState([]);
+  const [newUserUsername, setNewUserUsername] = useState('');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserRole, setNewUserRole] = useState('admin');
 
   // Supabase Connection State
   const [sbUrl, setSbUrl] = useState(() => {
@@ -161,9 +166,8 @@ export default function App() {
 
   const supabase = useMemo(() => new SupabaseService(sbUrl, sbKey), [sbUrl, sbKey]);
   const [isLiveSupabase, setIsLiveSupabase] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
 
-  // Core Application Data States (Clean initial state — no dummy data)
+  // Core Application Data States
   const [categories, setCategories] = useState([]);
   const [items, setItems] = useState([]);
   const [bills, setBills] = useState([]);
@@ -186,10 +190,8 @@ export default function App() {
   // Admin Sales Analytics Filter: 'daily' | 'weekly'
   const [salesReportPeriod, setSalesReportPeriod] = useState('daily');
 
-  // UI Feedback & Setup Guide Modal
+  // UI Feedback State
   const [toast, setToast] = useState(null);
-  const [showSetupModal, setShowSetupModal] = useState(false);
-  const [copiedSql, setCopiedSql] = useState(false);
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
@@ -202,7 +204,6 @@ export default function App() {
       setIsLiveSupabase(false);
       return;
     }
-    setIsSyncing(true);
     try {
       const [catsData, itemsData, billsData, billItemsData] = await Promise.all([
         supabase.request('categories?select=*&order=name.asc'),
@@ -221,6 +222,14 @@ export default function App() {
       setBills(billsWithItems);
       setIsLiveSupabase(true);
 
+      // Fetch database users safely
+      try {
+        const usersData = await supabase.request('app_users?select=*&order=created_at.asc');
+        setDbUsers(usersData || []);
+      } catch {
+        setDbUsers([]);
+      }
+
       if (catsData?.length > 0 && !catsData.some((c) => c.id === newItemCategory)) {
         setNewItemCategory(catsData[0].id);
       }
@@ -229,8 +238,6 @@ export default function App() {
       console.error(err);
       setIsLiveSupabase(false);
       if (!silent) showToast(`Supabase sync failed: ${err.message}`, 'error');
-    } finally {
-      setIsSyncing(false);
     }
   };
 
@@ -246,54 +253,131 @@ export default function App() {
     }
   }, [categories, newItemCategory]);
 
-  // Save Supabase Credentials locally
-  const handleSaveSupabaseConfig = (e) => {
+  // ============================================================================
+  // ADMIN AUTHENTICATION & DATABASE USER MANAGEMENT HANDLERS
+  // ============================================================================
+  const handleAdminLogin = async (e) => {
     e.preventDefault();
-    const cleanedUrl = sbUrl.trim().replace(/\/rest\/v1\/?$/, '').replace(/\/$/, '');
-    setSbUrl(cleanedUrl);
-    localStorage.setItem('olive_pos_sb_url', cleanedUrl);
-    localStorage.setItem('olive_pos_sb_key', sbKey.trim());
-    syncFromSupabase(false);
-  };
+    const enteredUser = loginUserInput.trim();
+    if (!enteredUser || !loginPassInput) {
+      setLoginError('Please enter both username and password.');
+      return;
+    }
 
-  // ============================================================================
-  // ADMIN AUTHENTICATION HANDLERS
-  // ============================================================================
-  const handleAdminLogin = (e) => {
-    e.preventDefault();
-    if (
-      loginUserInput.trim() === adminUsername &&
-      loginPassInput === adminPassword
-    ) {
-      setIsAdminAuthenticated(true);
-      setShowAdminLoginModal(false);
-      setActiveRole('admin');
-      setLoginUserInput('');
-      setLoginPassInput('');
-      setLoginError('');
-      showToast('Admin authenticated successfully!');
-    } else {
-      setLoginError('Invalid admin username or passcode.');
+    try {
+      let usersList = dbUsers;
+      if (supabase.isConfigured()) {
+        const freshUsers = await supabase.request('app_users?select=*&order=created_at.asc');
+        if (freshUsers) {
+          usersList = freshUsers;
+          setDbUsers(freshUsers);
+        }
+      }
+
+      const matchedDbUser = usersList.find(
+        (u) => u.username.toLowerCase() === enteredUser.toLowerCase() && u.password === loginPassInput
+      );
+
+      if (matchedDbUser) {
+        setIsAdminAuthenticated(true);
+        setCurrentLoggedInUser(matchedDbUser);
+        setShowAdminLoginModal(false);
+        setActiveRole('admin');
+        setLoginUserInput('');
+        setLoginPassInput('');
+        setLoginError('');
+        showToast(`Welcome, ${matchedDbUser.username}!`);
+      } else {
+        setLoginError('Invalid database username or password.');
+      }
+    } catch (err) {
+      setLoginError(`Authentication error: ${err.message}`);
     }
   };
 
   const handleAdminLogout = () => {
     setIsAdminAuthenticated(false);
+    setCurrentLoggedInUser(null);
     setActiveRole('sales');
-    showToast('Admin logged out.');
+    showToast('Logged out successfully.');
   };
 
-  const handleUpdateAdminPassword = (e) => {
+  const handleAddDbUser = async (e) => {
     e.preventDefault();
-    if (!newAdminPassInput.trim() || newAdminPassInput.trim().length < 4) {
-      showToast('Passcode must be at least 4 characters.', 'error');
+    const cleanUser = newUserUsername.trim();
+    const cleanPass = newUserPassword.trim();
+    if (!cleanUser || cleanPass.length < 4) {
+      showToast('Enter a username and a password with at least 4 characters.', 'error');
       return;
     }
-    const updated = newAdminPassInput.trim();
-    setAdminPassword(updated);
-    localStorage.setItem('olive_pos_admin_pass', updated);
-    setNewAdminPassInput('');
-    showToast('Admin passcode updated!');
+
+    try {
+      if (isLiveSupabase) {
+        await supabase.request('app_users', {
+          method: 'POST',
+          body: JSON.stringify({
+            username: cleanUser,
+            password: cleanPass,
+            role: newUserRole
+          })
+        });
+        await syncFromSupabase(true);
+      } else {
+        if (dbUsers.some((u) => u.username.toLowerCase() === cleanUser.toLowerCase())) {
+          showToast('Username already exists.', 'error');
+          return;
+        }
+        setDbUsers((prev) => [
+          ...prev,
+          { id: `user-${Date.now()}`, username: cleanUser, password: cleanPass, role: newUserRole }
+        ]);
+      }
+      setNewUserUsername('');
+      setNewUserPassword('');
+      setNewUserRole('admin');
+      showToast(`User "${cleanUser}" saved to database!`);
+    } catch (err) {
+      showToast(`Failed to save user: ${err.message}`, 'error');
+    }
+  };
+
+  const handleUpdateDbUserPassword = async (userId, updatedPass) => {
+    if (!updatedPass || updatedPass.trim().length < 4) {
+      showToast('Password must be at least 4 characters.', 'error');
+      return;
+    }
+    try {
+      if (isLiveSupabase) {
+        await supabase.request(`app_users?id=eq.${userId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ password: updatedPass.trim() })
+        });
+        await syncFromSupabase(true);
+      } else {
+        setDbUsers((prev) =>
+          prev.map((u) => (u.id === userId ? { ...u, password: updatedPass.trim() } : u))
+        );
+      }
+      showToast('User password updated in database!');
+    } catch (err) {
+      showToast(`Failed to update password: ${err.message}`, 'error');
+    }
+  };
+
+  const handleDeleteDbUser = async (user) => {
+    try {
+      if (isLiveSupabase) {
+        await supabase.request(`app_users?id=eq.${user.id}`, {
+          method: 'DELETE'
+        });
+        await syncFromSupabase(true);
+      } else {
+        setDbUsers((prev) => prev.filter((u) => u.id !== user.id));
+      }
+      showToast(`User "${user.username}" removed.`);
+    } catch (err) {
+      showToast(`Failed to delete user: ${err.message}`, 'error');
+    }
   };
 
   // ============================================================================
@@ -451,7 +535,7 @@ export default function App() {
   };
 
   // ============================================================================
-  // ADMIN OPERATIONS (STOCK, PRICE, CATEGORY CRUD & SAFE DELETE)
+  // ADMIN OPERATIONS (STOCK, PRICE, CATEGORY MAPPING & SAFE DELETE)
   // ============================================================================
   const handleCreateItem = async (e) => {
     e.preventDefault();
@@ -498,7 +582,7 @@ export default function App() {
     }
   };
 
-  const handleUpdateItemStockAndPrice = async (itemId, newPrice, newStock) => {
+  const handleUpdateItemStockAndPrice = async (itemId, newPrice, newStock, newCategoryId) => {
     const parsedPrice = Math.max(0, Number(newPrice) || 0);
     const parsedStock = Math.max(0, parseInt(newStock, 10) || 0);
 
@@ -509,6 +593,7 @@ export default function App() {
           body: JSON.stringify({
             price: parsedPrice,
             stock: parsedStock,
+            ...(newCategoryId ? { category_id: newCategoryId } : {}),
             updated_at: new Date().toISOString()
           })
         });
@@ -516,11 +601,18 @@ export default function App() {
       } else {
         setItems((prev) =>
           prev.map((it) =>
-            it.id === itemId ? { ...it, price: parsedPrice, stock: parsedStock } : it
+            it.id === itemId
+              ? {
+                  ...it,
+                  price: parsedPrice,
+                  stock: parsedStock,
+                  ...(newCategoryId ? { category_id: newCategoryId } : {})
+                }
+              : it
           )
         );
       }
-      showToast('Item price & stock updated!');
+      showToast('Item details & category mapping updated!');
     } catch (err) {
       showToast(`Update failed: ${err.message}`, 'error');
     }
@@ -711,12 +803,6 @@ export default function App() {
     });
   }, [items, selectedCategoryFilter, searchQuery]);
 
-  const copySqlToClipboard = () => {
-    navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA);
-    setCopiedSql(true);
-    setTimeout(() => setCopiedSql(false), 2000);
-  };
-
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-slate-900 font-sans selection:bg-purple-500/20">
       {/* Toast Notification Banner */}
@@ -755,6 +841,9 @@ export default function App() {
                     isLiveSupabase ? 'bg-purple-600 animate-pulse' : 'bg-amber-500'
                   }`}
                 />
+                <span className="text-slate-500">
+                  {isLiveSupabase ? 'Supabase Connected' : 'Local Mode'}
+                </span>
               </div>
             </div>
           </div>
@@ -1146,7 +1235,7 @@ export default function App() {
         <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
           {/* Admin Sub-Navigation */}
           <div className="flex flex-wrap items-center justify-between gap-4 bg-white border border-purple-100 shadow-xs p-4 rounded-2xl">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => setAdminTab('analytics')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
@@ -1168,6 +1257,17 @@ export default function App() {
               >
                 <Package className="w-4 h-4" />
                 Stock, Price & Categories
+              </button>
+              <button
+                onClick={() => setAdminTab('users')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+                  adminTab === 'users'
+                    ? 'bg-purple-700 text-white shadow-sm'
+                    : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
+                }`}
+              >
+                <Users className="w-4 h-4" />
+                Users & Passwords
               </button>
             </div>
           </div>
@@ -1394,7 +1494,7 @@ export default function App() {
           {/* ADMIN TAB 2: INVENTORY CREATION, STOCK/PRICE UPDATES & CATEGORY MANAGEMENT */}
           {adminTab === 'inventory' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Left Column: Add Item, Add/Delete Category, Security */}
+              {/* Left Column: Add Item & Add/Delete Category */}
               <div className="lg:col-span-4 space-y-6">
                 {/* Create Category with Default Expense Percentage */}
                 <form
@@ -1411,7 +1511,7 @@ export default function App() {
                     <input
                       type="text"
                       required
-                      placeholder="e.g., Beverages"
+                      placeholder="e.g., Cakes & Pastries"
                       value={newCategoryName}
                       onChange={(e) => setNewCategoryName(e.target.value)}
                       className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
@@ -1441,7 +1541,6 @@ export default function App() {
                     Create Category
                   </button>
 
-                  {/* Existing Categories List with Safe Delete Option */}
                   {categories.length > 0 && (
                     <div className="pt-3 border-t border-purple-100 space-y-2">
                       <span className="block text-xs font-semibold text-slate-500">
@@ -1492,7 +1591,7 @@ export default function App() {
                     <input
                       type="text"
                       required
-                      placeholder="e.g., Cold Brew Coffee"
+                      placeholder="e.g., Chocolate Truffle Cake"
                       value={newItemName}
                       onChange={(e) => setNewItemName(e.target.value)}
                       className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
@@ -1525,7 +1624,7 @@ export default function App() {
                         step="0.01"
                         min="0"
                         required
-                        placeholder="150"
+                        placeholder="450"
                         value={newItemPrice}
                         onChange={(e) => setNewItemPrice(e.target.value)}
                         className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
@@ -1537,7 +1636,7 @@ export default function App() {
                         type="number"
                         min="0"
                         required
-                        placeholder="25"
+                        placeholder="20"
                         value={newItemStock}
                         onChange={(e) => setNewItemStock(e.target.value)}
                         className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
@@ -1553,42 +1652,16 @@ export default function App() {
                     Add Item to Stock
                   </button>
                 </form>
-
-                {/* Update Admin Passcode */}
-                <form
-                  onSubmit={handleUpdateAdminPassword}
-                  className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-3"
-                >
-                  <div className="flex items-center gap-2 text-purple-950 font-bold text-sm">
-                    <KeyRound className="w-4 h-4 text-purple-600" />
-                    <h3>Change Admin Passcode</h3>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      placeholder="New passcode (min 4 chars)"
-                      value={newAdminPassInput}
-                      onChange={(e) => setNewAdminPassInput(e.target.value)}
-                      className="flex-1 bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-purple-500"
-                    />
-                    <button
-                      type="submit"
-                      className="px-3.5 py-2 rounded-xl bg-purple-800 hover:bg-purple-700 text-white text-xs font-semibold"
-                    >
-                      Update
-                    </button>
-                  </div>
-                </form>
               </div>
 
-              {/* Right Column: Live Stock & Price Editor Table */}
+              {/* Right Column: Live Stock, Category Mapping & Price Editor Table */}
               <div className="lg:col-span-8 bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
                 <div className="p-5 border-b border-purple-100">
                   <h3 className="font-bold text-purple-950 text-base">
-                    Manage Item Stock & Pricing
+                    Manage Item Category Mapping, Stock & Pricing
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Edit price or restock quantities directly. Changes immediately sync to the Sales Terminal.
+                    Reassign category mapping, edit price, or restock quantities directly. Changes immediately sync to the Sales Terminal.
                   </p>
                 </div>
 
@@ -1597,7 +1670,7 @@ export default function App() {
                     <thead>
                       <tr className="bg-[#FAF8F5] border-b border-purple-100 text-xs uppercase tracking-wider text-slate-500">
                         <th className="py-3.5 px-5">Item Name</th>
-                        <th className="py-3.5 px-4">Category</th>
+                        <th className="py-3.5 px-4">Category Mapping</th>
                         <th className="py-3.5 px-4">Price (₹)</th>
                         <th className="py-3.5 px-4">Stock Qty</th>
                         <th className="py-3.5 px-5 text-right">Quick Restock</th>
@@ -1611,17 +1684,131 @@ export default function App() {
                           </td>
                         </tr>
                       ) : (
-                        items.map((item) => {
-                          const cat = categories.find((c) => c.id === item.category_id);
-                          return (
-                            <InventoryRow
-                              key={item.id}
-                              item={item}
-                              categoryName={cat?.name || 'General'}
-                              onSave={handleUpdateItemStockAndPrice}
-                            />
-                          );
-                        })
+                        items.map((item) => (
+                          <InventoryRow
+                            key={item.id}
+                            item={item}
+                            categories={categories}
+                            onSave={handleUpdateItemStockAndPrice}
+                          />
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ADMIN TAB 3: DATABASE USERS & PASSWORD MANAGEMENT */}
+          {adminTab === 'users' && (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Add New User to DB */}
+              <div className="lg:col-span-4 space-y-6">
+                <form
+                  onSubmit={handleAddDbUser}
+                  className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-4"
+                >
+                  <div className="flex items-center gap-2 text-purple-950 font-bold">
+                    <UserPlus className="w-5 h-5 text-purple-600" />
+                    <h3>Add New User (Save in DB)</h3>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Username
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g., manager1"
+                      value={newUserUsername}
+                      onChange={(e) => setNewUserUsername(e.target.value)}
+                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Password / Passcode
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      placeholder="Min 4 characters"
+                      value={newUserPassword}
+                      onChange={(e) => setNewUserPassword(e.target.value)}
+                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Role
+                    </label>
+                    <select
+                      value={newUserRole}
+                      onChange={(e) => setNewUserRole(e.target.value)}
+                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
+                    >
+                      <option value="admin">Admin (Full Access)</option>
+                      <option value="staff">Staff</option>
+                    </select>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 px-4 rounded-xl bg-purple-700 hover:bg-purple-600 text-white font-semibold text-sm shadow-sm transition-colors"
+                  >
+                    Save User to Database
+                  </button>
+                </form>
+              </div>
+
+              {/* Saved Database Users Table */}
+              <div className="lg:col-span-8 bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
+                <div className="p-5 border-b border-purple-100 flex items-center justify-between">
+                  <div>
+                    <h3 className="font-bold text-purple-950 text-base">
+                      Registered Users in Database
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Manage user accounts and reset passwords stored in Supabase (`app_users`).
+                    </p>
+                  </div>
+                  {currentLoggedInUser && (
+                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-purple-100 text-purple-800">
+                      Signed in as: {currentLoggedInUser.username}
+                    </span>
+                  )}
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-[#FAF8F5] border-b border-purple-100 text-xs uppercase tracking-wider text-slate-500">
+                        <th className="py-3.5 px-5">Username</th>
+                        <th className="py-3.5 px-4">Role</th>
+                        <th className="py-3.5 px-4">Update Password</th>
+                        <th className="py-3.5 px-5 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-purple-50 text-sm">
+                      {dbUsers.length === 0 ? (
+                        <tr>
+                          <td colSpan={4} className="py-10 text-center text-slate-400 text-xs">
+                            No database users added yet. Add a user on the left to store credentials in Supabase.
+                          </td>
+                        </tr>
+                      ) : (
+                        dbUsers.map((u) => (
+                          <UserRow
+                            key={u.id}
+                            user={u}
+                            onUpdatePassword={handleUpdateDbUserPassword}
+                            onDelete={handleDeleteDbUser}
+                          />
+                        ))
                       )}
                     </tbody>
                   </table>
@@ -1704,124 +1891,42 @@ export default function App() {
           </form>
         </div>
       )}
-
-      {/* ========================================================================
-          LOCAL VITE + SUPABASE SETUP MODAL
-      ======================================================================== */}
-      {showSetupModal && (
-        <div className="fixed inset-0 z-50 bg-purple-950/40 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white border border-purple-200 rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-6">
-            <div className="flex items-center justify-between border-b border-purple-100 pb-4">
-              <div className="flex items-center gap-2.5">
-                <Database className="w-6 h-6 text-purple-600" />
-                <div>
-                  <h2 className="text-lg font-bold text-purple-950">
-                    olive-pos — Vite + Supabase Setup
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    Connect your live Supabase PostgreSQL project or run locally on your machine
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowSetupModal(false)}
-                className="px-3 py-1.5 rounded-lg bg-[#FAF8F5] hover:bg-purple-100 border border-purple-200 text-xs font-semibold text-purple-900"
-              >
-                Close
-              </button>
-            </div>
-
-            {/* Step 1: Connect Live Supabase Credentials Right Here */}
-            <form
-              onSubmit={handleSaveSupabaseConfig}
-              className="bg-[#FAF8F5] border border-purple-100 rounded-xl p-4 space-y-3"
-            >
-              <h3 className="text-sm font-bold text-purple-800">
-                1. Connect Your Supabase Project (Instant Live Sync)
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    VITE_SUPABASE_URL
-                  </label>
-                  <input
-                    type="url"
-                    placeholder="https://xyzcompany.supabase.co"
-                    value={sbUrl}
-                    onChange={(e) => setSbUrl(e.target.value)}
-                    className="w-full bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs text-slate-900"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">
-                    VITE_SUPABASE_ANON_KEY
-                  </label>
-                  <input
-                    type="password"
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..."
-                    value={sbKey}
-                    onChange={(e) => setSbKey(e.target.value)}
-                    className="w-full bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs text-slate-900"
-                  />
-                </div>
-              </div>
-              <div className="flex items-center justify-between pt-1">
-                <span className="text-xs text-slate-500">
-                  Leave empty to use Local Mode.
-                </span>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-600 text-white text-xs font-semibold"
-                >
-                  Save & Connect Supabase
-                </button>
-              </div>
-            </form>
-
-            {/* Step 2: Supabase SQL Editor Schema */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-bold text-purple-950">
-                  2. Supabase SQL Schema (Paste in Supabase SQL Editor)
-                </h3>
-                <button
-                  type="button"
-                  onClick={copySqlToClipboard}
-                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-purple-100 hover:bg-purple-200 text-xs text-purple-900 font-semibold"
-                >
-                  {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                  {copiedSql ? 'Copied SQL!' : 'Copy SQL'}
-                </button>
-              </div>
-              <pre className="bg-purple-950 border border-purple-900 rounded-xl p-3.5 text-xs text-purple-100 overflow-x-auto max-h-56 font-mono leading-relaxed">
-                {SUPABASE_SQL_SCHEMA}
-              </pre>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-// Helper Component for Inline Inventory Editing
-function InventoryRow({ item, categoryName, onSave }) {
+// Helper Component for Inline Inventory & Category Mapping Editing
+function InventoryRow({ item, categories, onSave }) {
   const [price, setPrice] = useState(item.price);
   const [stock, setStock] = useState(item.stock);
-  const isDirty = Number(price) !== Number(item.price) || Number(stock) !== Number(item.stock);
+  const [categoryId, setCategoryId] = useState(item.category_id || '');
+  const isDirty =
+    Number(price) !== Number(item.price) ||
+    Number(stock) !== Number(item.stock) ||
+    categoryId !== (item.category_id || '');
 
   useEffect(() => {
     setPrice(item.price);
     setStock(item.stock);
-  }, [item.price, item.stock]);
+    setCategoryId(item.category_id || '');
+  }, [item.price, item.stock, item.category_id]);
 
   return (
     <tr className="hover:bg-[#FAF8F5]/80">
       <td className="py-3.5 px-5 font-semibold text-slate-900">{item.name}</td>
       <td className="py-3.5 px-4">
-        <span className="px-2.5 py-1 rounded-md bg-[#FAF8F5] border border-purple-100 text-purple-800 text-xs font-medium">
-          {categoryName}
-        </span>
+        <select
+          value={categoryId}
+          onChange={(e) => setCategoryId(e.target.value)}
+          className="bg-[#FAF8F5] border border-purple-200 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-purple-900 focus:outline-none focus:border-purple-600 focus:bg-white"
+        >
+          {!categoryId && <option value="">Uncategorized</option>}
+          {categories.map((cat) => (
+            <option key={cat.id} value={cat.id}>
+              {cat.name}
+            </option>
+          ))}
+        </select>
       </td>
       <td className="py-3.5 px-4">
         <input
@@ -1850,7 +1955,7 @@ function InventoryRow({ item, categoryName, onSave }) {
         <div className="inline-flex items-center gap-2">
           <button
             type="button"
-            onClick={() => onSave(item.id, price, Number(stock) + 10)}
+            onClick={() => onSave(item.id, price, Number(stock) + 10, categoryId)}
             className="px-2.5 py-1.5 rounded-lg bg-[#FAF8F5] hover:bg-purple-100 border border-purple-200 text-xs font-semibold text-purple-900"
             title="Add 10 units to stock"
           >
@@ -1859,7 +1964,7 @@ function InventoryRow({ item, categoryName, onSave }) {
           <button
             type="button"
             disabled={!isDirty}
-            onClick={() => onSave(item.id, price, stock)}
+            onClick={() => onSave(item.id, price, stock, categoryId)}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
               isDirty
                 ? 'bg-purple-700 hover:bg-purple-600 text-white shadow-xs'
@@ -1869,6 +1974,61 @@ function InventoryRow({ item, categoryName, onSave }) {
             Save
           </button>
         </div>
+      </td>
+    </tr>
+  );
+}
+
+// Helper Component for Inline Database User Password Management
+function UserRow({ user, onUpdatePassword, onDelete }) {
+  const [passDraft, setPassDraft] = useState('');
+
+  const handleSavePass = () => {
+    if (!passDraft.trim()) return;
+    onUpdatePassword(user.id, passDraft);
+    setPassDraft('');
+  };
+
+  return (
+    <tr className="hover:bg-[#FAF8F5]/80">
+      <td className="py-3.5 px-5 font-semibold text-slate-900">{user.username}</td>
+      <td className="py-3.5 px-4">
+        <span className="px-2.5 py-1 rounded-md bg-purple-100 text-purple-800 text-xs font-semibold uppercase">
+          {user.role}
+        </span>
+      </td>
+      <td className="py-3.5 px-4">
+        <div className="flex items-center gap-2">
+          <input
+            type="password"
+            placeholder="New password"
+            value={passDraft}
+            onChange={(e) => setPassDraft(e.target.value)}
+            className="w-36 bg-[#FAF8F5] border border-purple-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
+          />
+          <button
+            type="button"
+            disabled={passDraft.trim().length < 4}
+            onClick={handleSavePass}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+              passDraft.trim().length >= 4
+                ? 'bg-purple-700 hover:bg-purple-600 text-white'
+                : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+            }`}
+          >
+            Save Pass
+          </button>
+        </div>
+      </td>
+      <td className="py-3.5 px-5 text-right">
+        <button
+          type="button"
+          onClick={() => onDelete(user)}
+          title="Delete user"
+          className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-100 transition-colors"
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
       </td>
     </tr>
   );
