@@ -23,7 +23,9 @@ import {
   IndianRupee,
   Lock,
   LogOut,
-  KeyRound
+  KeyRound,
+  Banknote,
+  QrCode
 } from 'lucide-react';
 
 const SUPABASE_SQL_SCHEMA = `-- 1. Categories Table (Stores category names & Admin-configured expense percentages)
@@ -44,13 +46,16 @@ CREATE TABLE IF NOT EXISTS items (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 3. Bills Table (Stores generated bills with timestamp)
+-- 3. Bills Table (Stores generated bills with timestamp & payment method)
 CREATE TABLE IF NOT EXISTS bills (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   bill_number TEXT UNIQUE NOT NULL,
   total_amount NUMERIC(10,2) NOT NULL,
+  payment_method TEXT NOT NULL DEFAULT 'Cash' CHECK (payment_method IN ('Cash', 'UPI')),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'Cash';
 
 -- 4. Bill Items Table (Line items for category-wise daily/weekly analytics)
 CREATE TABLE IF NOT EXISTS bill_items (
@@ -78,7 +83,7 @@ CREATE POLICY "Allow all operations on bill_items" ON bill_items FOR ALL USING (
 
 class SupabaseService {
   constructor(url, anonKey) {
-    this.url = url?.trim().replace(/\/rest\/v1\/?$/i, '').replace(/\/$/, '');
+    this.url = url?.trim().replace(/\/rest\/v1\/?$/, '').replace(/\/$/, '');
     this.key = anonKey?.trim();
   }
 
@@ -88,7 +93,8 @@ class SupabaseService {
 
   async request(path, options = {}) {
     if (!this.isConfigured()) throw new Error('Supabase credentials not configured');
-    const res = await fetch(`${this.url}/rest/v1/${path}`, {
+    const cleanPath = path.replace(/^\/+/, '');
+    const res = await fetch(`${this.url}/rest/v1/${cleanPath}`, {
       ...options,
       headers: {
         apikey: this.key,
@@ -108,38 +114,36 @@ class SupabaseService {
 }
 
 export default function App() {
+  // Navigation & Admin Authentication State
   const [activeRole, setActiveRole] = useState('sales');
   const [adminTab, setAdminTab] = useState('analytics');
-
-  // Admin Authentication State (Supports VITE_ADMIN_USER & VITE_ADMIN_PASSWORD from .env)
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
-  const [adminUserInput, setAdminUserInput] = useState('');
-  const [adminLoginInput, setAdminLoginInput] = useState('');
-  const [adminLoginError, setAdminLoginError] = useState('');
-  const [adminUsername] = useState(() => {
-    try {
-      return (
-        (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_USER) ||
-        localStorage.getItem('olive_pos_admin_user') ||
-        'admin'
-      );
-    } catch {
-      return localStorage.getItem('olive_pos_admin_user') || 'admin';
-    }
-  });
-  const [adminPassword, setAdminPassword] = useState(() => {
-    try {
-      return (
-        (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_PASSWORD) ||
-        localStorage.getItem('olive_pos_admin_pwd') ||
-        'admin123'
-      );
-    } catch {
-      return localStorage.getItem('olive_pos_admin_pwd') || 'admin123';
-    }
-  });
-  const [newAdminPasswordInput, setNewAdminPasswordInput] = useState('');
+  const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
+  const [loginUserInput, setLoginUserInput] = useState('');
+  const [loginPassInput, setLoginPassInput] = useState('');
+  const [loginError, setLoginError] = useState('');
 
+  const envAdminUser = useMemo(() => {
+    try {
+      return (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_USER) || 'admin';
+    } catch {
+      return 'admin';
+    }
+  }, []);
+
+  const envAdminPass = useMemo(() => {
+    try {
+      return (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_PASSWORD) || 'admin123';
+    } catch {
+      return 'admin123';
+    }
+  }, []);
+
+  const [adminUsername, setAdminUsername] = useState(() => localStorage.getItem('olive_pos_admin_user') || envAdminUser);
+  const [adminPassword, setAdminPassword] = useState(() => localStorage.getItem('olive_pos_admin_pass') || envAdminPass);
+  const [newAdminPassInput, setNewAdminPassInput] = useState('');
+
+  // Supabase Connection State
   const [sbUrl, setSbUrl] = useState(() => {
     try {
       return (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_URL) || localStorage.getItem('olive_pos_sb_url') || '';
@@ -159,15 +163,19 @@ export default function App() {
   const [isLiveSupabase, setIsLiveSupabase] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
+  // Core Application Data States (Clean initial state — no dummy data)
   const [categories, setCategories] = useState([]);
   const [items, setItems] = useState([]);
   const [bills, setBills] = useState([]);
 
+  // Sales POS Cart State
   const [cart, setCart] = useState([]);
+  const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState('ALL');
   const [latestGeneratedBill, setLatestGeneratedBill] = useState(null);
 
+  // Admin Inventory Form States
   const [newItemName, setNewItemName] = useState('');
   const [newItemCategory, setNewItemCategory] = useState('');
   const [newItemPrice, setNewItemPrice] = useState('');
@@ -175,51 +183,20 @@ export default function App() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newCategoryExpense, setNewCategoryExpense] = useState('15');
 
+  // Admin Sales Analytics Filter: 'daily' | 'weekly'
   const [salesReportPeriod, setSalesReportPeriod] = useState('daily');
+
+  // UI Feedback & Setup Guide Modal
   const [toast, setToast] = useState(null);
   const [showSetupModal, setShowSetupModal] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
 
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
-    setTimeout(() => setToast(null), 3500);
+    setTimeout(() => setToast(null), 4000);
   };
 
-  const handleAdminLogin = (e) => {
-    e.preventDefault();
-    if (
-      adminUserInput.trim().toLowerCase() === adminUsername.trim().toLowerCase() &&
-      adminLoginInput === adminPassword
-    ) {
-      setIsAdminAuthenticated(true);
-      setAdminUserInput('');
-      setAdminLoginInput('');
-      setAdminLoginError('');
-      showToast(`Welcome back, ${adminUsername}! Admin access unlocked.`);
-    } else {
-      setAdminLoginError('Invalid admin username or passcode. Please try again.');
-    }
-  };
-
-  const handleAdminLogout = () => {
-    setIsAdminAuthenticated(false);
-    setActiveRole('sales');
-    showToast('Admin session locked.');
-  };
-
-  const handleUpdateAdminPassword = (e) => {
-    e.preventDefault();
-    if (newAdminPasswordInput.trim().length < 4) {
-      showToast('Passcode must be at least 4 characters.', 'error');
-      return;
-    }
-    const trimmed = newAdminPasswordInput.trim();
-    setAdminPassword(trimmed);
-    localStorage.setItem('olive_pos_admin_pwd', trimmed);
-    setNewAdminPasswordInput('');
-    showToast('Admin passcode updated!');
-  };
-
+  // Fetch Data from Supabase if configured
   const syncFromSupabase = async (silent = false) => {
     if (!supabase.isConfigured()) {
       setIsLiveSupabase(false);
@@ -243,13 +220,15 @@ export default function App() {
       setItems(itemsData || []);
       setBills(billsWithItems);
       setIsLiveSupabase(true);
+
       if (catsData?.length > 0 && !catsData.some((c) => c.id === newItemCategory)) {
         setNewItemCategory(catsData[0].id);
       }
       if (!silent) showToast('Synced live data from Supabase!');
     } catch (err) {
+      console.error(err);
       setIsLiveSupabase(false);
-      if (!silent) showToast(`Supabase sync failed: ${err.message}. Running in Local Mode.`, 'error');
+      if (!silent) showToast(`Supabase sync failed: ${err.message}`, 'error');
     } finally {
       setIsSyncing(false);
     }
@@ -261,13 +240,65 @@ export default function App() {
     }
   }, [supabase]);
 
+  useEffect(() => {
+    if (categories.length > 0 && !categories.some((c) => c.id === newItemCategory)) {
+      setNewItemCategory(categories[0].id);
+    }
+  }, [categories, newItemCategory]);
+
+  // Save Supabase Credentials locally
   const handleSaveSupabaseConfig = (e) => {
     e.preventDefault();
-    localStorage.setItem('olive_pos_sb_url', sbUrl.trim());
+    const cleanedUrl = sbUrl.trim().replace(/\/rest\/v1\/?$/, '').replace(/\/$/, '');
+    setSbUrl(cleanedUrl);
+    localStorage.setItem('olive_pos_sb_url', cleanedUrl);
     localStorage.setItem('olive_pos_sb_key', sbKey.trim());
     syncFromSupabase(false);
   };
 
+  // ============================================================================
+  // ADMIN AUTHENTICATION HANDLERS
+  // ============================================================================
+  const handleAdminLogin = (e) => {
+    e.preventDefault();
+    if (
+      loginUserInput.trim() === adminUsername &&
+      loginPassInput === adminPassword
+    ) {
+      setIsAdminAuthenticated(true);
+      setShowAdminLoginModal(false);
+      setActiveRole('admin');
+      setLoginUserInput('');
+      setLoginPassInput('');
+      setLoginError('');
+      showToast('Admin authenticated successfully!');
+    } else {
+      setLoginError('Invalid admin username or passcode.');
+    }
+  };
+
+  const handleAdminLogout = () => {
+    setIsAdminAuthenticated(false);
+    setActiveRole('sales');
+    showToast('Admin logged out.');
+  };
+
+  const handleUpdateAdminPassword = (e) => {
+    e.preventDefault();
+    if (!newAdminPassInput.trim() || newAdminPassInput.trim().length < 4) {
+      showToast('Passcode must be at least 4 characters.', 'error');
+      return;
+    }
+    const updated = newAdminPassInput.trim();
+    setAdminPassword(updated);
+    localStorage.setItem('olive_pos_admin_pass', updated);
+    setNewAdminPassInput('');
+    showToast('Admin passcode updated!');
+  };
+
+  // ============================================================================
+  // SALES USER OPERATIONS (CART ADD, INLINE EDIT, DELETE, CHECKOUT)
+  // ============================================================================
   const addToCart = (item) => {
     if (item.stock <= 0) {
       showToast(`"${item.name}" is out of stock!`, 'error');
@@ -304,6 +335,24 @@ export default function App() {
     );
   };
 
+  const setExactCartQty = (itemId, rawValue) => {
+    const parsed = parseInt(rawValue, 10);
+    if (isNaN(parsed) || parsed <= 0) {
+      removeFromCart(itemId);
+      return;
+    }
+    setCart((prev) =>
+      prev.map((c) => {
+        if (c.item.id !== itemId) return c;
+        if (parsed > c.item.stock) {
+          showToast(`Only ${c.item.stock} units available in stock.`, 'error');
+          return { ...c, quantity: c.item.stock };
+        }
+        return { ...c, quantity: parsed };
+      })
+    );
+  };
+
   const removeFromCart = (itemId) => {
     setCart((prev) => prev.filter((c) => c.item.id !== itemId));
   };
@@ -313,6 +362,7 @@ export default function App() {
     [cart]
   );
 
+  // Generate Live Digital Bill (No Printing) & Deduct Item Stock
   const handleGenerateBill = async () => {
     if (cart.length === 0) return;
 
@@ -339,6 +389,7 @@ export default function App() {
           body: JSON.stringify({
             bill_number: billNumber,
             total_amount: totalAmount,
+            payment_method: paymentMethod,
             created_at: timestamp
           })
         });
@@ -369,6 +420,7 @@ export default function App() {
         await syncFromSupabase(true);
         setLatestGeneratedBill({
           ...insertedBill,
+          payment_method: paymentMethod,
           items: lineItemsPayload
         });
       } else {
@@ -376,6 +428,7 @@ export default function App() {
           id: `bill-${Date.now()}`,
           bill_number: billNumber,
           total_amount: totalAmount,
+          payment_method: paymentMethod,
           created_at: timestamp,
           items: lineItemsPayload
         };
@@ -391,14 +444,21 @@ export default function App() {
       }
 
       setCart([]);
-      showToast(`Live Bill ${billNumber} generated & inventory updated!`);
+      showToast(`Live Bill ${billNumber} (${paymentMethod}) generated & inventory updated!`);
     } catch (err) {
       showToast(`Failed to generate bill: ${err.message}`, 'error');
     }
   };
 
+  // ============================================================================
+  // ADMIN OPERATIONS (STOCK, PRICE, CATEGORY CRUD & SAFE DELETE)
+  // ============================================================================
   const handleCreateItem = async (e) => {
     e.preventDefault();
+    if (!newItemCategory) {
+      showToast('Please create and select a category first.', 'error');
+      return;
+    }
     const price = parseFloat(newItemPrice);
     const stock = parseInt(newItemStock, 10);
     if (!newItemName.trim() || isNaN(price) || price < 0 || isNaN(stock) || stock < 0) {
@@ -491,15 +551,59 @@ export default function App() {
           expense_percentage: expPct
         };
         setCategories((prev) => [...prev, created]);
-        if (!newItemCategory) {
-          setNewItemCategory(created.id);
-        }
+        if (!newItemCategory) setNewItemCategory(created.id);
       }
       setNewCategoryName('');
       setNewCategoryExpense('15');
       showToast('Category added!');
     } catch (err) {
       showToast(`Error creating category: ${err.message}`, 'error');
+    }
+  };
+
+  // Safe Category Deletion: Deletes category & unbilled items, blocks if any billed items exist
+  const handleDeleteCategory = async (category) => {
+    const categoryItemIds = new Set(
+      items.filter((it) => it.category_id === category.id).map((it) => it.id)
+    );
+
+    const hasBilledItems = bills.some((bill) =>
+      (bill.items || []).some(
+        (line) =>
+          line.category_name?.toLowerCase() === category.name.toLowerCase() ||
+          (line.item_id && categoryItemIds.has(line.item_id))
+      )
+    );
+
+    if (hasBilledItems) {
+      showToast(
+        `Warning: Cannot delete "${category.name}" because billed items exist in sales records. Billed items were preserved.`,
+        'error'
+      );
+      return;
+    }
+
+    try {
+      if (isLiveSupabase) {
+        await supabase.request(`items?category_id=eq.${category.id}`, {
+          method: 'DELETE'
+        });
+        await supabase.request(`categories?id=eq.${category.id}`, {
+          method: 'DELETE'
+        });
+        await syncFromSupabase(true);
+      } else {
+        setItems((prev) => prev.filter((it) => it.category_id !== category.id));
+        setCategories((prev) => prev.filter((c) => c.id !== category.id));
+      }
+
+      setCart((prev) => prev.filter((c) => c.item.category_id !== category.id));
+      if (selectedCategoryFilter === category.id) {
+        setSelectedCategoryFilter('ALL');
+      }
+      showToast(`Category "${category.name}" and its unbilled items were deleted.`);
+    } catch (err) {
+      showToast(`Failed to delete category: ${err.message}`, 'error');
     }
   };
 
@@ -525,6 +629,9 @@ export default function App() {
     }
   };
 
+  // ============================================================================
+  // DAILY & WEEKLY CATEGORY-WISE SALES + EXPENSE HIGHLIGHT CALCULATIONS
+  // ============================================================================
   const analyticsData = useMemo(() => {
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -592,6 +699,7 @@ export default function App() {
     };
   }, [bills, categories, salesReportPeriod]);
 
+  // Filtered items for Sales POS grid
   const visiblePosItems = useMemo(() => {
     return items.filter((it) => {
       const matchesCat =
@@ -611,9 +719,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-slate-900 font-sans selection:bg-purple-500/20">
+      {/* Toast Notification Banner */}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-xl border backdrop-blur-md transition-all ${
+          className={`fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-xl border backdrop-blur-md max-w-md transition-all ${
             toast.type === 'error'
               ? 'bg-rose-50/95 border-rose-300 text-rose-800'
               : 'bg-purple-950/95 border-purple-700 text-white'
@@ -628,8 +737,10 @@ export default function App() {
         </div>
       )}
 
+      {/* Top Navigation Header */}
       <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-purple-100 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+          {/* Brand Logo */}
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-600 to-violet-700 flex items-center justify-center shadow-md shadow-purple-600/20">
               <Receipt className="w-5 h-5 text-white" />
@@ -648,45 +759,68 @@ export default function App() {
             </div>
           </div>
 
+          {/* Role Switcher — Admin Panel is ONLY shown after Admin Login */}
           <div className="flex items-center gap-2 sm:gap-3">
-            <div className="bg-[#FAF8F5] p-1 rounded-xl border border-purple-100 flex items-center">
-              <button
-                onClick={() => setActiveRole('sales')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
-                  activeRole === 'sales'
-                    ? 'bg-purple-600 text-white shadow-sm'
-                    : 'text-slate-600 hover:text-purple-900'
-                }`}
-              >
-                <UserCheck className="w-4 h-4" />
-                <span>Sales Terminal</span>
-              </button>
+            {isAdminAuthenticated ? (
+              <>
+                <div className="bg-[#FAF8F5] p-1 rounded-xl border border-purple-100 flex items-center">
+                  <button
+                    onClick={() => setActiveRole('sales')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                      activeRole === 'sales'
+                        ? 'bg-purple-600 text-white shadow-sm'
+                        : 'text-slate-600 hover:text-purple-900'
+                    }`}
+                  >
+                    <UserCheck className="w-4 h-4" />
+                    <span>Sales Terminal</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveRole('admin')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                      activeRole === 'admin'
+                        ? 'bg-purple-800 text-white shadow-sm'
+                        : 'text-slate-600 hover:text-purple-900'
+                    }`}
+                  >
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>Admin Panel</span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={handleAdminLogout}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs sm:text-sm font-semibold border border-rose-200 transition-colors"
+                  title="Logout Admin"
+                >
+                  <LogOut className="w-4 h-4" />
+                  <span className="hidden sm:inline">Logout</span>
+                </button>
+              </>
+            ) : (
               <button
                 onClick={() => {
-                  setActiveRole('admin');
-                  setAdminLoginError('');
+                  setLoginError('');
+                  setShowAdminLoginModal(true);
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
-                  activeRole === 'admin'
-                    ? 'bg-purple-800 text-white shadow-sm'
-                    : 'text-slate-600 hover:text-purple-900'
-                }`}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#FAF8F5] hover:bg-purple-50 text-slate-600 hover:text-purple-900 text-xs font-medium border border-purple-100 transition-colors"
               >
-                {isAdminAuthenticated ? (
-                  <ShieldCheck className="w-4 h-4" />
-                ) : (
-                  <Lock className="w-3.5 h-3.5" />
-                )}
-                <span>Admin Panel</span>
+                <Lock className="w-3.5 h-3.5 text-purple-600" />
+                <span>Admin Sign In</span>
               </button>
-            </div>
+            )}
           </div>
         </div>
       </header>
 
+      {/* ========================================================================
+          ROLE 1: SALES USER TERMINAL (LIVE BILLING WITHOUT PRINTING)
+      ======================================================================== */}
       {activeRole === 'sales' && (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Left Column: Product Catalog */}
           <div className="lg:col-span-7 xl:col-span-8 space-y-4">
+            {/* Search & Category Filter Bar */}
             <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-4 flex flex-col sm:flex-row gap-3">
               <div className="relative flex-1">
                 <Search className="w-4 h-4 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -728,77 +862,79 @@ export default function App() {
             {/* Product Grid */}
             {visiblePosItems.length === 0 ? (
               <div className="bg-white border border-dashed border-purple-200 rounded-2xl p-12 text-center">
-                <Package className="w-10 h-10 text-purple-300 mx-auto mb-3" />
-                <p className="text-sm font-semibold text-slate-700">No items available</p>
-                <p className="text-xs text-slate-400 mt-1">
-                  Log into the Admin Panel to create categories and add inventory items.
+                <Package className="w-10 h-10 text-purple-300 mx-auto mb-2" />
+                <h3 className="text-base font-bold text-purple-950">No items available</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Sign in as Admin to create categories and add inventory items.
                 </p>
               </div>
             ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
-              {visiblePosItems.map((item) => {
-                const cat = categories.find((c) => c.id === item.category_id);
-                const inCart = cart.find((c) => c.item.id === item.id);
-                const isOutOfStock = item.stock <= 0;
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                {visiblePosItems.map((item) => {
+                  const cat = categories.find((c) => c.id === item.category_id);
+                  const inCart = cart.find((c) => c.item.id === item.id);
+                  const isOutOfStock = item.stock <= 0;
 
-                return (
-                  <div
-                    key={item.id}
-                    onClick={() => !isOutOfStock && addToCart(item)}
-                    className={`group relative rounded-2xl border p-4 transition-all flex flex-col justify-between ${
-                      isOutOfStock
-                        ? 'bg-white/60 border-slate-200 opacity-60 cursor-not-allowed'
-                        : 'bg-white border-purple-100 hover:border-purple-400 hover:shadow-md hover:shadow-purple-900/5 cursor-pointer active:scale-[0.99]'
-                    }`}
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-2 mb-2">
-                        <span className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-[#FAF8F5] text-purple-800 border border-purple-100">
-                          {cat?.name || 'General'}
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => !isOutOfStock && addToCart(item)}
+                      className={`group relative rounded-2xl border p-4 transition-all flex flex-col justify-between ${
+                        isOutOfStock
+                          ? 'bg-white/60 border-slate-200 opacity-60 cursor-not-allowed'
+                          : 'bg-white border-purple-100 hover:border-purple-400 hover:shadow-md hover:shadow-purple-900/5 cursor-pointer active:scale-[0.99]'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-md bg-[#FAF8F5] text-purple-800 border border-purple-100">
+                            {cat?.name || 'General'}
+                          </span>
+                          <span
+                            className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                              item.stock === 0
+                                ? 'bg-rose-100 text-rose-700'
+                                : item.stock <= 5
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-purple-100 text-purple-800'
+                            }`}
+                          >
+                            {item.stock === 0 ? 'Out of Stock' : `${item.stock} in stock`}
+                          </span>
+                        </div>
+                        <h3 className="font-semibold text-slate-900 text-sm sm:text-base leading-snug mb-3">
+                          {item.name}
+                        </h3>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-3 border-t border-purple-50">
+                        <span className="text-lg font-bold text-purple-950 flex items-center">
+                          <IndianRupee className="w-4 h-4 text-purple-600" />
+                          {Number(item.price).toFixed(2)}
                         </span>
-                        <span
-                          className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                            item.stock === 0
-                              ? 'bg-rose-100 text-rose-700'
-                              : item.stock <= 5
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-purple-100 text-purple-800'
+                        <button
+                          type="button"
+                          disabled={isOutOfStock}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition-colors ${
+                            inCart
+                              ? 'bg-purple-700 text-white shadow-xs'
+                              : 'bg-purple-50 text-purple-700 group-hover:bg-purple-600 group-hover:text-white'
                           }`}
                         >
-                          {item.stock === 0 ? 'Out of Stock' : `${item.stock} in stock`}
-                        </span>
+                          <Plus className="w-3.5 h-3.5" />
+                          {inCart ? `In Cart (${inCart.quantity})` : 'Add'}
+                        </button>
                       </div>
-                      <h3 className="font-semibold text-slate-900 text-sm sm:text-base leading-snug mb-3">
-                        {item.name}
-                      </h3>
                     </div>
-
-                    <div className="flex items-center justify-between pt-3 border-t border-purple-50">
-                      <span className="text-lg font-bold text-purple-950 flex items-center">
-                        <IndianRupee className="w-4 h-4 text-purple-600" />
-                        {Number(item.price).toFixed(2)}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={isOutOfStock}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition-colors ${
-                          inCart
-                            ? 'bg-purple-700 text-white shadow-xs'
-                            : 'bg-purple-50 text-purple-700 group-hover:bg-purple-600 group-hover:text-white'
-                        }`}
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        {inCart ? `In Cart (${inCart.quantity})` : 'Add'}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
             )}
           </div>
 
+          {/* Right Column: Live Cart (with Edit & Delete) & Instant Paperless Bill */}
           <div className="lg:col-span-5 xl:col-span-4 space-y-5">
+            {/* Active Cart Panel */}
             <div className="bg-white border border-purple-100 shadow-sm rounded-2xl p-5 flex flex-col">
               <div className="flex items-center justify-between pb-4 border-b border-purple-100">
                 <div className="flex items-center gap-2.5">
@@ -822,6 +958,7 @@ export default function App() {
                 )}
               </div>
 
+              {/* Cart Items List with Direct Quantity Edit & Delete */}
               <div className="py-4 space-y-3 max-h-[340px] overflow-y-auto">
                 {cart.length === 0 ? (
                   <div className="text-center py-10 px-4 bg-[#FAF8F5] rounded-xl border border-dashed border-purple-200">
@@ -835,7 +972,7 @@ export default function App() {
                   cart.map(({ item, quantity }) => (
                     <div
                       key={item.id}
-                      className="flex items-center justify-between gap-3 bg-[#FAF8F5] border border-purple-100 rounded-xl p-3"
+                      className="flex items-center justify-between gap-2.5 bg-[#FAF8F5] border border-purple-100 rounded-xl p-3"
                     >
                       <div className="min-w-0 flex-1">
                         <h4 className="text-sm font-semibold text-slate-900 truncate">
@@ -849,25 +986,37 @@ export default function App() {
                         </p>
                       </div>
 
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1">
                         <button
+                          type="button"
                           onClick={() => updateCartQty(item.id, -1)}
+                          title="Decrease quantity"
                           className="w-7 h-7 rounded-lg bg-white border border-purple-200 hover:bg-purple-50 flex items-center justify-center text-purple-900"
                         >
                           <Minus className="w-3.5 h-3.5" />
                         </button>
-                        <span className="w-6 text-center text-xs font-bold text-slate-900">
-                          {quantity}
-                        </span>
+                        <input
+                          type="number"
+                          min="1"
+                          max={item.stock}
+                          value={quantity}
+                          onChange={(e) => setExactCartQty(item.id, e.target.value)}
+                          title="Edit item quantity"
+                          className="w-12 h-7 text-center text-xs font-bold text-purple-950 bg-white border border-purple-200 rounded-lg focus:outline-none focus:border-purple-600"
+                        />
                         <button
+                          type="button"
                           onClick={() => updateCartQty(item.id, 1)}
+                          title="Increase quantity"
                           className="w-7 h-7 rounded-lg bg-white border border-purple-200 hover:bg-purple-50 flex items-center justify-center text-purple-900"
                         >
                           <Plus className="w-3.5 h-3.5" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => removeFromCart(item.id)}
-                          className="w-7 h-7 rounded-lg hover:bg-rose-100 text-slate-400 hover:text-rose-600 flex items-center justify-center ml-1"
+                          title="Delete item from cart"
+                          className="w-7 h-7 rounded-lg bg-white border border-rose-200 hover:bg-rose-100 text-rose-600 flex items-center justify-center ml-1"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -877,15 +1026,49 @@ export default function App() {
                 )}
               </div>
 
-              <div className="pt-4 border-t border-purple-100 space-y-4">
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-sm text-slate-500">
+              {/* Cart Subtotal, Payment Method & Generate Live Bill CTA */}
+              <div className="pt-4 border-t border-purple-100 space-y-3.5">
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-slate-500">
                     <span>Items Subtotal</span>
                     <span>₹{cartSubtotal.toFixed(2)}</span>
                   </div>
-                  <div className="flex justify-between text-lg font-bold text-purple-950 pt-1">
-                    <span>Total Bill Payable</span>
+                  <div className="flex justify-between text-lg font-bold text-purple-950">
+                    <span>Total Payable</span>
                     <span className="text-purple-700">₹{cartSubtotal.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                {/* Compact Pill Payment Method Selector: Cash or UPI */}
+                <div className="flex items-center justify-between bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Payment Mode
+                  </span>
+                  <div className="inline-flex items-center bg-white p-0.5 rounded-lg border border-purple-200/80 shadow-2xs">
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMethod('Cash')}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                        paymentMethod === 'Cash'
+                          ? 'bg-gradient-to-r from-purple-600 to-violet-700 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-purple-900'
+                      }`}
+                    >
+                      <Banknote className="w-3.5 h-3.5" />
+                      <span>Cash</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPaymentMethod('UPI')}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                        paymentMethod === 'UPI'
+                          ? 'bg-gradient-to-r from-purple-600 to-violet-700 text-white shadow-xs'
+                          : 'text-slate-600 hover:text-purple-900'
+                      }`}
+                    >
+                      <QrCode className="w-3.5 h-3.5" />
+                      <span>UPI</span>
+                    </button>
                   </div>
                 </div>
 
@@ -895,11 +1078,12 @@ export default function App() {
                   className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-purple-600 to-violet-700 hover:from-purple-500 hover:to-violet-600 disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 text-white font-bold text-sm shadow-lg shadow-purple-600/20 disabled:shadow-none transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <CheckCircle2 className="w-5 h-5" />
-                  Generate Live Digital Bill
+                  Generate Live Bill ({paymentMethod})
                 </button>
               </div>
             </div>
 
+            {/* Live Digital Bill Display (Paperless Confirmation with Timestamp) */}
             {latestGeneratedBill && (
               <div className="bg-gradient-to-b from-purple-50 to-white border border-purple-300 rounded-2xl p-5 shadow-md">
                 <div className="flex items-center justify-between mb-3">
@@ -912,11 +1096,24 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="text-xs text-slate-600 mb-3 pb-3 border-b border-purple-100 flex items-center justify-between">
-                  <span>Timestamp:</span>
-                  <span className="font-mono font-medium text-purple-900">
-                    {new Date(latestGeneratedBill.created_at).toLocaleString()}
-                  </span>
+                <div className="text-xs text-slate-600 mb-3 pb-3 border-b border-purple-100 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span>Timestamp:</span>
+                    <span className="font-mono font-medium text-purple-900">
+                      {new Date(latestGeneratedBill.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Payment Mode:</span>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-100 text-purple-900 font-semibold">
+                      {latestGeneratedBill.payment_method === 'UPI' ? (
+                        <QrCode className="w-3 h-3" />
+                      ) : (
+                        <Banknote className="w-3 h-3" />
+                      )}
+                      {latestGeneratedBill.payment_method || 'Cash'}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="space-y-1.5 mb-3 max-h-40 overflow-y-auto">
@@ -942,93 +1139,12 @@ export default function App() {
         </main>
       )}
 
-      {activeRole === 'admin' && !isAdminAuthenticated && (
-        <main className="max-w-md mx-auto px-4 py-16">
-          <form
-            onSubmit={handleAdminLogin}
-            className="bg-white border border-purple-100 shadow-lg shadow-purple-950/5 rounded-2xl p-6 sm:p-8 space-y-5"
-          >
-            <div className="flex flex-col items-center text-center space-y-2">
-              <div className="w-12 h-12 rounded-2xl bg-purple-100 text-purple-700 flex items-center justify-center">
-                <Lock className="w-6 h-6" />
-              </div>
-              <h2 className="text-xl font-bold text-purple-950">Admin Access Required</h2>
-              <p className="text-xs text-slate-500">
-                Sign in with your Admin credentials to view sales reports, category expenses, and inventory controls.
-              </p>
-            </div>
-
-            <div className="space-y-3.5">
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                  Admin Username
-                </label>
-                <div className="relative">
-                  <UserCheck className="w-4 h-4 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    required
-                    autoFocus
-                    placeholder="Enter admin username (default: admin)"
-                    value={adminUserInput}
-                    onChange={(e) => {
-                      setAdminUserInput(e.target.value);
-                      if (adminLoginError) setAdminLoginError('');
-                    }}
-                    className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                  Admin Passcode
-                </label>
-                <div className="relative">
-                  <KeyRound className="w-4 h-4 text-purple-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="password"
-                    required
-                    placeholder="Enter password"
-                    value={adminLoginInput}
-                    onChange={(e) => {
-                      setAdminLoginInput(e.target.value);
-                      if (adminLoginError) setAdminLoginError('');
-                    }}
-                    className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
-                  />
-                </div>
-              </div>
-
-              {adminLoginError && (
-                <p className="text-xs text-rose-600 font-medium flex items-center gap-1">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  {adminLoginError}
-                </p>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2.5 pt-1">
-              <button
-                type="button"
-                onClick={() => setActiveRole('sales')}
-                className="flex-1 py-2.5 px-4 rounded-xl bg-[#FAF8F5] hover:bg-purple-50 text-slate-700 border border-purple-100 font-semibold text-sm transition-colors"
-              >
-                Back to Sales
-              </button>
-              <button
-                type="submit"
-                className="flex-1 py-2.5 px-4 rounded-xl bg-purple-700 hover:bg-purple-600 text-white font-semibold text-sm shadow-sm transition-colors"
-              >
-                Unlock Admin
-              </button>
-            </div>
-          </form>
-        </main>
-      )}
-
+      {/* ========================================================================
+          ROLE 2: ADMIN PANEL (ONLY ACCESSIBLE AFTER LOGIN)
+      ======================================================================== */}
       {activeRole === 'admin' && isAdminAuthenticated && (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+          {/* Admin Sub-Navigation */}
           <div className="flex flex-wrap items-center justify-between gap-4 bg-white border border-purple-100 shadow-xs p-4 rounded-2xl">
             <div className="flex items-center gap-2">
               <button
@@ -1054,11 +1170,12 @@ export default function App() {
                 Stock, Price & Categories
               </button>
             </div>
-
           </div>
 
+          {/* ADMIN TAB 1: DAILY & WEEKLY SALES + CATEGORY EXPENSE HIGHLIGHT */}
           {adminTab === 'analytics' && (
             <div className="space-y-6">
+              {/* Period Toggle & Summary KPI Cards */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                   <h2 className="text-xl font-bold text-purple-950">
@@ -1097,6 +1214,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Top Summary Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5">
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -1136,6 +1254,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Category Breakdown Table with Admin Expense % Inline Control */}
               <div className="bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
                 <div className="p-5 border-b border-purple-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
@@ -1163,57 +1282,66 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-purple-50 text-sm">
-                      {analyticsData.categoryRows.map((row) => (
-                        <tr key={row.categoryName} className="hover:bg-[#FAF8F5]/80">
-                          <td className="py-4 px-5 font-semibold text-slate-900">
-                            {row.categoryName}
-                          </td>
-                          <td className="py-4 px-4 text-right text-slate-600">
-                            {row.unitsSold}
-                          </td>
-                          <td className="py-4 px-4 text-right font-bold text-slate-900">
-                            ₹{row.totalSales.toFixed(2)}
-                          </td>
-                          <td className="py-4 px-4">
-                            {row.categoryId ? (
-                              <div className="flex items-center justify-center gap-1">
-                                <input
-                                  type="number"
-                                  step="0.5"
-                                  min="0"
-                                  max="100"
-                                  value={row.expensePercentage}
-                                  onChange={(e) =>
-                                    handleUpdateCategoryExpense(
-                                      row.categoryId,
-                                      e.target.value
-                                    )
-                                  }
-                                  className="w-20 bg-[#FAF8F5] border border-purple-200 rounded-lg px-2.5 py-1 text-center text-sm font-bold text-purple-800 focus:outline-none focus:border-purple-600 focus:bg-white"
-                                />
-                                <span className="text-slate-400 text-xs">%</span>
-                              </div>
-                            ) : (
-                              <span className="text-slate-400 text-xs block text-center">
-                                N/A
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-4 px-5 text-right bg-purple-50/90 border-x border-purple-200/70">
-                            <span className="inline-flex items-center px-3 py-1 rounded-lg bg-purple-600 text-white font-bold shadow-xs">
-                              ₹{row.expenseAmount.toFixed(2)}
-                            </span>
-                          </td>
-                          <td className="py-4 px-5 text-right font-semibold text-slate-800">
-                            ₹{row.netAfterExpense.toFixed(2)}
+                      {analyticsData.categoryRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-8 text-center text-slate-400 text-xs">
+                            No categories or sales recorded yet.
                           </td>
                         </tr>
-                      ))}
+                      ) : (
+                        analyticsData.categoryRows.map((row) => (
+                          <tr key={row.categoryName} className="hover:bg-[#FAF8F5]/80">
+                            <td className="py-4 px-5 font-semibold text-slate-900">
+                              {row.categoryName}
+                            </td>
+                            <td className="py-4 px-4 text-right text-slate-600">
+                              {row.unitsSold}
+                            </td>
+                            <td className="py-4 px-4 text-right font-bold text-slate-900">
+                              ₹{row.totalSales.toFixed(2)}
+                            </td>
+                            <td className="py-4 px-4">
+                              {row.categoryId ? (
+                                <div className="flex items-center justify-center gap-1">
+                                  <input
+                                    type="number"
+                                    step="0.5"
+                                    min="0"
+                                    max="100"
+                                    value={row.expensePercentage}
+                                    onChange={(e) =>
+                                      handleUpdateCategoryExpense(
+                                        row.categoryId,
+                                        e.target.value
+                                      )
+                                    }
+                                    className="w-20 bg-[#FAF8F5] border border-purple-200 rounded-lg px-2.5 py-1 text-center text-sm font-bold text-purple-800 focus:outline-none focus:border-purple-600 focus:bg-white"
+                                  />
+                                  <span className="text-slate-400 text-xs">%</span>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 text-xs block text-center">
+                                  N/A
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-4 px-5 text-right bg-purple-50/90 border-x border-purple-200/70">
+                              <span className="inline-flex items-center px-3 py-1 rounded-lg bg-purple-600 text-white font-bold shadow-xs">
+                                ₹{row.expenseAmount.toFixed(2)}
+                              </span>
+                            </td>
+                            <td className="py-4 px-5 text-right font-semibold text-slate-800">
+                              ₹{row.netAfterExpense.toFixed(2)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
               </div>
 
+              {/* Recent Generated Bills Ledger with Timestamps */}
               <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5">
                 <h3 className="font-bold text-purple-950 text-base mb-4">
                   Generated Bills Ledger ({salesReportPeriod === 'daily' ? 'Today' : 'Last 7 Days'})
@@ -1233,6 +1361,14 @@ export default function App() {
                           <div className="flex items-center gap-2.5">
                             <span className="font-mono text-xs font-bold text-purple-700">
                               {bill.bill_number}
+                            </span>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-purple-100 text-purple-800">
+                              {bill.payment_method === 'UPI' ? (
+                                <QrCode className="w-3 h-3" />
+                              ) : (
+                                <Banknote className="w-3 h-3" />
+                              )}
+                              {bill.payment_method || 'Cash'}
                             </span>
                             <span className="text-xs text-slate-500">
                               {new Date(bill.created_at).toLocaleString()}
@@ -1255,9 +1391,93 @@ export default function App() {
             </div>
           )}
 
+          {/* ADMIN TAB 2: INVENTORY CREATION, STOCK/PRICE UPDATES & CATEGORY MANAGEMENT */}
           {adminTab === 'inventory' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              {/* Left Column: Add Item, Add/Delete Category, Security */}
               <div className="lg:col-span-4 space-y-6">
+                {/* Create Category with Default Expense Percentage */}
+                <form
+                  onSubmit={handleAddCategory}
+                  className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-4"
+                >
+                  <div className="flex items-center gap-2 text-purple-950 font-bold">
+                    <Layers className="w-5 h-5 text-purple-600" />
+                    <h3>Manage Categories & Expense %</h3>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Category Name</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g., Beverages"
+                      value={newCategoryName}
+                      onChange={(e) => setNewCategoryName(e.target.value)}
+                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Expense Highlight Percentage (%)
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      max="100"
+                      required
+                      value={newCategoryExpense}
+                      onChange={(e) => setNewCategoryExpense(e.target.value)}
+                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 px-4 rounded-xl bg-purple-100 hover:bg-purple-200 text-purple-900 border border-purple-200 font-semibold text-sm transition-colors"
+                  >
+                    Create Category
+                  </button>
+
+                  {/* Existing Categories List with Safe Delete Option */}
+                  {categories.length > 0 && (
+                    <div className="pt-3 border-t border-purple-100 space-y-2">
+                      <span className="block text-xs font-semibold text-slate-500">
+                        Existing Categories ({categories.length})
+                      </span>
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                        {categories.map((cat) => {
+                          const itemCount = items.filter((i) => i.category_id === cat.id).length;
+                          return (
+                            <div
+                              key={cat.id}
+                              className="flex items-center justify-between gap-2 bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2 text-xs"
+                            >
+                              <div>
+                                <span className="font-semibold text-slate-900">{cat.name}</span>
+                                <span className="text-slate-500 ml-1.5">
+                                  ({cat.expense_percentage}% exp • {itemCount} items)
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteCategory(cat)}
+                                title="Delete category (blocks if billed items exist)"
+                                className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-100 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </form>
+
+                {/* Create New Inventory Item */}
                 <form
                   onSubmit={handleCreateItem}
                   className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-4"
@@ -1272,7 +1492,7 @@ export default function App() {
                     <input
                       type="text"
                       required
-                      placeholder="e.g., Espresso Roast Beans"
+                      placeholder="e.g., Cold Brew Coffee"
                       value={newItemName}
                       onChange={(e) => setNewItemName(e.target.value)}
                       className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
@@ -1286,6 +1506,9 @@ export default function App() {
                       onChange={(e) => setNewItemCategory(e.target.value)}
                       className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
                     >
+                      {categories.length === 0 && (
+                        <option value="">Create a category first</option>
+                      )}
                       {categories.map((cat) => (
                         <option key={cat.id} value={cat.id}>
                           {cat.name}
@@ -1324,59 +1547,41 @@ export default function App() {
 
                   <button
                     type="submit"
-                    className="w-full py-2.5 px-4 rounded-xl bg-purple-700 hover:bg-purple-600 text-white font-semibold text-sm shadow-sm transition-colors"
+                    disabled={categories.length === 0}
+                    className="w-full py-2.5 px-4 rounded-xl bg-purple-700 hover:bg-purple-600 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold text-sm shadow-sm transition-colors"
                   >
                     Add Item to Stock
                   </button>
                 </form>
 
+                {/* Update Admin Passcode */}
                 <form
-                  onSubmit={handleAddCategory}
-                  className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-4"
+                  onSubmit={handleUpdateAdminPassword}
+                  className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-3"
                 >
-                  <div className="flex items-center gap-2 text-purple-950 font-bold">
-                    <Layers className="w-5 h-5 text-purple-600" />
-                    <h3>Add Category & Expense %</h3>
+                  <div className="flex items-center gap-2 text-purple-950 font-bold text-sm">
+                    <KeyRound className="w-4 h-4 text-purple-600" />
+                    <h3>Change Admin Passcode</h3>
                   </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">Category Name</label>
+                  <div className="flex gap-2">
                     <input
-                      type="text"
-                      required
-                      placeholder="e.g., Frozen Foods"
-                      value={newCategoryName}
-                      onChange={(e) => setNewCategoryName(e.target.value)}
-                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
+                      type="password"
+                      placeholder="New passcode (min 4 chars)"
+                      value={newAdminPassInput}
+                      onChange={(e) => setNewAdminPassInput(e.target.value)}
+                      className="flex-1 bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-purple-500"
                     />
+                    <button
+                      type="submit"
+                      className="px-3.5 py-2 rounded-xl bg-purple-800 hover:bg-purple-700 text-white text-xs font-semibold"
+                    >
+                      Update
+                    </button>
                   </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Expense Highlight Percentage (%)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0"
-                      max="100"
-                      required
-                      value={newCategoryExpense}
-                      onChange={(e) => setNewCategoryExpense(e.target.value)}
-                      className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-500 focus:bg-white"
-                    />
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full py-2.5 px-4 rounded-xl bg-purple-100 hover:bg-purple-200 text-purple-900 border border-purple-200 font-semibold text-sm transition-colors"
-                  >
-                    Create Category
-                  </button>
                 </form>
-
               </div>
 
+              {/* Right Column: Live Stock & Price Editor Table */}
               <div className="lg:col-span-8 bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
                 <div className="p-5 border-b border-purple-100">
                   <h3 className="font-bold text-purple-950 text-base">
@@ -1399,17 +1604,25 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-purple-50 text-sm">
-                      {items.map((item) => {
-                        const cat = categories.find((c) => c.id === item.category_id);
-                        return (
-                          <InventoryRow
-                            key={item.id}
-                            item={item}
-                            categoryName={cat?.name || 'General'}
-                            onSave={handleUpdateItemStockAndPrice}
-                          />
-                        );
-                      })}
+                      {items.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-10 text-center text-slate-400 text-xs">
+                            No inventory items added yet. Use the form on the left to add items.
+                          </td>
+                        </tr>
+                      ) : (
+                        items.map((item) => {
+                          const cat = categories.find((c) => c.id === item.category_id);
+                          return (
+                            <InventoryRow
+                              key={item.id}
+                              item={item}
+                              categoryName={cat?.name || 'General'}
+                              onSave={handleUpdateItemStockAndPrice}
+                            />
+                          );
+                        })
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -1419,6 +1632,82 @@ export default function App() {
         </main>
       )}
 
+      {/* ========================================================================
+          ADMIN LOGIN MODAL
+      ======================================================================== */}
+      {showAdminLoginModal && (
+        <div className="fixed inset-0 z-50 bg-purple-950/40 backdrop-blur-sm flex items-center justify-center p-4">
+          <form
+            onSubmit={handleAdminLogin}
+            className="bg-white border border-purple-200 rounded-2xl max-w-sm w-full p-6 shadow-2xl space-y-4"
+          >
+            <div className="flex items-center justify-between border-b border-purple-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-purple-950">Admin Access</h2>
+                  <p className="text-xs text-slate-500">Sign in to reveal Admin Panel</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdminLoginModal(false)}
+                className="text-xs font-semibold text-slate-500 hover:text-purple-900 px-2 py-1"
+              >
+                Close
+              </button>
+            </div>
+
+            {loginError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs font-medium text-rose-700">
+                {loginError}
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                Admin Username
+              </label>
+              <input
+                type="text"
+                required
+                autoFocus
+                placeholder="admin"
+                value={loginUserInput}
+                onChange={(e) => setLoginUserInput(e.target.value)}
+                className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                Admin Passcode
+              </label>
+              <input
+                type="password"
+                required
+                placeholder="••••••••"
+                value={loginPassInput}
+                onChange={(e) => setLoginPassInput(e.target.value)}
+                className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl px-3.5 py-2.5 text-sm text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full py-2.5 px-4 rounded-xl bg-purple-700 hover:bg-purple-600 text-white font-semibold text-sm shadow-sm transition-colors"
+            >
+              Unlock Admin Panel
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* ========================================================================
+          LOCAL VITE + SUPABASE SETUP MODAL
+      ======================================================================== */}
       {showSetupModal && (
         <div className="fixed inset-0 z-50 bg-purple-950/40 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white border border-purple-200 rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-6">
@@ -1442,6 +1731,7 @@ export default function App() {
               </button>
             </div>
 
+            {/* Step 1: Connect Live Supabase Credentials Right Here */}
             <form
               onSubmit={handleSaveSupabaseConfig}
               className="bg-[#FAF8F5] border border-purple-100 rounded-xl p-4 space-y-3"
@@ -1477,7 +1767,7 @@ export default function App() {
               </div>
               <div className="flex items-center justify-between pt-1">
                 <span className="text-xs text-slate-500">
-                  Leave empty to continue using Local Demo Mode.
+                  Leave empty to use Local Mode.
                 </span>
                 <button
                   type="submit"
@@ -1488,6 +1778,7 @@ export default function App() {
               </div>
             </form>
 
+            {/* Step 2: Supabase SQL Editor Schema */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-bold text-purple-950">
@@ -1513,6 +1804,7 @@ export default function App() {
   );
 }
 
+// Helper Component for Inline Inventory Editing
 function InventoryRow({ item, categoryName, onSave }) {
   const [price, setPrice] = useState(item.price);
   const [stock, setStock] = useState(item.stock);
