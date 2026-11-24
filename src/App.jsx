@@ -27,7 +27,8 @@ import {
   ArrowRightLeft,
   ImagePlus,
   FolderTree,
-  ChevronDown
+  ChevronDown,
+  X
 } from 'lucide-react';
 
 // Resize uploaded image to a compact JPEG data URL so it saves cleanly in Supabase & loads fast
@@ -149,6 +150,17 @@ export default function App() {
   const [assignItemId, setAssignItemId] = useState('');
   const [assignStockQty, setAssignStockQty] = useState('');
 
+  // Stock Alerts Tab Filters
+  const [stockAlertStatusFilter, setStockAlertStatusFilter] = useState('ALL');
+  const [stockAlertShopFilter, setStockAlertShopFilter] = useState('ALL');
+  const [stockAlertSearchQuery, setStockAlertSearchQuery] = useState('');
+  const [lowStockThreshold, setLowStockThreshold] = useState(5);
+
+  // Stock Update Shop Filter & Category-Level Draft Stock Maps
+  const [stockUpdateShopFilter, setStockUpdateShopFilter] = useState('ALL');
+  const [stockDrafts, setStockDrafts] = useState({});
+  const [alertStockDrafts, setAlertStockDrafts] = useState({});
+
   // Supabase Connection State
   const [sbUrl] = useState(() => {
     try {
@@ -176,7 +188,10 @@ export default function App() {
 
   // Sales POS Cart State
   const [cart, setCart] = useState([]);
+  const [isMobileCartOpen, setIsMobileCartOpen] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('Cash');
+  const [splitCashAmount, setSplitCashAmount] = useState('');
+  const [splitUpiAmount, setSplitUpiAmount] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState('ALL');
   const [selectedSubcategoryFilter, setSelectedSubcategoryFilter] = useState('ALL');
@@ -197,6 +212,13 @@ export default function App() {
 
   // Admin Sales Analytics & Generated Bills Tab Filters
   const [salesReportPeriod, setSalesReportPeriod] = useState('daily');
+  const [analyticsDate, setAnalyticsDate] = useState(() => {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  });
   const [billDateFilter, setBillDateFilter] = useState(() => {
     const now = new Date();
     const yyyy = now.getFullYear();
@@ -765,6 +787,82 @@ export default function App() {
     }
   };
 
+  const handleBatchUpdateShopStock = async (updates, draftTarget = 'stock') => {
+    if (!updates || updates.length === 0) return;
+
+    const timestamp = new Date().toISOString();
+    try {
+      if (isLiveSupabase) {
+        await Promise.all(
+          updates.map(({ shopId, itemId, stock }) => {
+            const parsed = Math.max(0, parseInt(stock, 10) || 0);
+            const existing = shopStocks.find(
+              (ss) => ss.shop_id === shopId && ss.item_id === itemId
+            );
+            if (existing) {
+              return supabase.request(`shop_stocks?id=eq.${existing.id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({
+                  stock: parsed,
+                  updated_at: timestamp
+                })
+              });
+            }
+            return supabase.request('shop_stocks', {
+              method: 'POST',
+              body: JSON.stringify({
+                shop_id: shopId,
+                item_id: itemId,
+                stock: parsed
+              })
+            });
+          })
+        );
+        await syncFromSupabase(true);
+      } else {
+        setShopStocks((prev) => {
+          const next = [...prev];
+          updates.forEach(({ shopId, itemId, stock }) => {
+            const parsed = Math.max(0, parseInt(stock, 10) || 0);
+            const idx = next.findIndex(
+              (ss) => ss.shop_id === shopId && ss.item_id === itemId
+            );
+            if (idx >= 0) {
+              next[idx] = { ...next[idx], stock: parsed };
+            } else {
+              next.push({
+                id: `ss-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                shop_id: shopId,
+                item_id: itemId,
+                stock: parsed
+              });
+            }
+          });
+          return next;
+        });
+      }
+
+      const clearDrafts = (prev) => {
+        const next = { ...prev };
+        updates.forEach(({ shopId, itemId }) => {
+          delete next[`${shopId}::${itemId}`];
+        });
+        return next;
+      };
+      if (draftTarget === 'alerts') {
+        setAlertStockDrafts(clearDrafts);
+      } else {
+        setStockDrafts(clearDrafts);
+      }
+
+      showToast(
+        `Updated stock for ${updates.length} ${updates.length === 1 ? 'item' : 'items'}!`
+      );
+    } catch (err) {
+      showToast(`Failed to update category stock: ${err.message}`, 'error');
+    }
+  };
+
   // ============================================================================
   // SALES USER OPERATIONS (SHOP-SCOPED STOCK, CART EDIT, DELETE, CHECKOUT)
   // ============================================================================
@@ -847,6 +945,30 @@ export default function App() {
     [cart]
   );
 
+  const handleSplitCashChange = (val) => {
+    setSplitCashAmount(val);
+    if (val === '') {
+      setSplitUpiAmount('');
+      return;
+    }
+    const parsed = parseFloat(val);
+    if (!isNaN(parsed) && parsed >= 0 && parsed <= cartSubtotal) {
+      setSplitUpiAmount(Math.max(0, cartSubtotal - parsed).toFixed(2));
+    }
+  };
+
+  const handleSplitUpiChange = (val) => {
+    setSplitUpiAmount(val);
+    if (val === '') {
+      setSplitCashAmount('');
+      return;
+    }
+    const parsed = parseFloat(val);
+    if (!isNaN(parsed) && parsed >= 0 && parsed <= cartSubtotal) {
+      setSplitCashAmount(Math.max(0, cartSubtotal - parsed).toFixed(2));
+    }
+  };
+
   // Generate Live Digital Bill (No Printing) & Deduct Active Shop's Stock
   const handleGenerateBill = async () => {
     if (cart.length === 0) return;
@@ -855,6 +977,31 @@ export default function App() {
     const billNumber = `INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
     const totalAmount = cartSubtotal;
     const targetShopId = activeShopId || null;
+
+    let finalPaymentMethod = paymentMethod;
+    let cashAmount = paymentMethod === 'Cash' ? Number(totalAmount.toFixed(2)) : 0;
+    let upiAmount = paymentMethod === 'UPI' ? Number(totalAmount.toFixed(2)) : 0;
+
+    if (paymentMethod === 'Split') {
+      const cashAmt = parseFloat(splitCashAmount);
+      const upiAmt = parseFloat(splitUpiAmount);
+      if (
+        isNaN(cashAmt) ||
+        isNaN(upiAmt) ||
+        cashAmt <= 0 ||
+        upiAmt <= 0 ||
+        Math.abs(cashAmt + upiAmt - totalAmount) > 0.01
+      ) {
+        showToast(
+          `Split amounts (Cash + UPI) must both be greater than ₹0 and equal ₹${totalAmount.toFixed(2)}.`,
+          'error'
+        );
+        return;
+      }
+      finalPaymentMethod = 'Split';
+      cashAmount = Number(cashAmt.toFixed(2));
+      upiAmount = Number(upiAmt.toFixed(2));
+    }
 
     const lineItemsPayload = cart.map((entry) => {
       const cat = categories.find((c) => c.id === entry.item.category_id);
@@ -878,7 +1025,9 @@ export default function App() {
           body: JSON.stringify({
             bill_number: billNumber,
             total_amount: totalAmount,
-            payment_method: paymentMethod,
+            payment_method: finalPaymentMethod,
+            cash_amount: cashAmount,
+            upi_amount: upiAmount,
             shop_id: targetShopId,
             created_at: timestamp
           })
@@ -937,7 +1086,9 @@ export default function App() {
         await syncFromSupabase(true);
         setLatestGeneratedBill({
           ...insertedBill,
-          payment_method: paymentMethod,
+          payment_method: finalPaymentMethod,
+          cash_amount: cashAmount,
+          upi_amount: upiAmount,
           shop_id: targetShopId,
           items: lineItemsPayload
         });
@@ -946,7 +1097,9 @@ export default function App() {
           id: `bill-${Date.now()}`,
           bill_number: billNumber,
           total_amount: totalAmount,
-          payment_method: paymentMethod,
+          payment_method: finalPaymentMethod,
+          cash_amount: cashAmount,
+          upi_amount: upiAmount,
           shop_id: targetShopId,
           created_at: timestamp,
           items: lineItemsPayload
@@ -973,8 +1126,14 @@ export default function App() {
       }
 
       setCart([]);
+      setSplitCashAmount('');
+      setSplitUpiAmount('');
+      const paymentSummary =
+        finalPaymentMethod === 'Split'
+          ? `Split (Cash: ₹${cashAmount.toFixed(2)}, UPI: ₹${upiAmount.toFixed(2)})`
+          : finalPaymentMethod;
       showToast(
-        `Live Bill ${billNumber} (${paymentMethod}) generated${
+        `Live Bill ${billNumber} (${paymentSummary}) generated${
           currentActiveShop ? ` for ${currentActiveShop.name}` : ''
         } & stock updated!`
       );
@@ -1479,6 +1638,15 @@ export default function App() {
   // ============================================================================
   // DAILY & WEEKLY CATEGORY-WISE & SHOP-WISE SALES + STOCK ANALYTICS
   // ============================================================================
+  const getBillPaymentAmounts = (bill) => {
+    const total = Number(bill.total_amount) || 0;
+    const cash = Number(bill.cash_amount) || 0;
+    const upi = Number(bill.upi_amount) || 0;
+    if (cash > 0 || upi > 0) return { cash, upi };
+    if ((bill.payment_method || 'Cash') === 'UPI') return { cash: 0, upi: total };
+    return { cash: total, upi: 0 };
+  };
+
   const effectiveAnalyticsShopId = isShopAdmin
     ? currentLoggedInUser?.shop_id
     : adminSelectedShopFilter;
@@ -1486,17 +1654,35 @@ export default function App() {
   const isAllShopsAnalyticsSelected = isSuperAdmin && effectiveAnalyticsShopId === 'ALL';
 
   const analyticsData = useMemo(() => {
-    const now = new Date();
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const sevenDaysAgo = new Date(startOfToday);
-    sevenDaysAgo.setDate(startOfToday.getDate() - 6);
+    const baseDate = analyticsDate
+      ? (() => {
+          const [y, m, d] = analyticsDate.split('-').map(Number);
+          return new Date(y, m - 1, d);
+        })()
+      : new Date();
+    const startOfSelectedDay = new Date(
+      baseDate.getFullYear(),
+      baseDate.getMonth(),
+      baseDate.getDate()
+    );
+    const endOfSelectedDay = new Date(
+      baseDate.getFullYear(),
+      baseDate.getMonth(),
+      baseDate.getDate() + 1
+    );
+    const sevenDaysStart = new Date(startOfSelectedDay);
+    sevenDaysStart.setDate(startOfSelectedDay.getDate() - 6);
+
+    const isBillInSelectedRange = (createdAt) => {
+      const billDate = new Date(createdAt);
+      if (salesReportPeriod === 'daily') {
+        return billDate >= startOfSelectedDay && billDate < endOfSelectedDay;
+      }
+      return billDate >= sevenDaysStart && billDate < endOfSelectedDay;
+    };
 
     const filteredBills = bills.filter((bill) => {
-      const billDate = new Date(bill.created_at);
-      const matchesDate =
-        salesReportPeriod === 'daily'
-          ? billDate >= startOfToday
-          : billDate >= sevenDaysAgo;
+      const matchesDate = isBillInSelectedRange(bill.created_at);
       if (!matchesDate) return false;
       if (isShopAdmin) {
         return bill.shop_id === currentLoggedInUser?.shop_id;
@@ -1565,15 +1751,19 @@ export default function App() {
 
     const shopRows = visibleShopsList.map((shop) => {
       const shopPeriodBills = bills.filter((b) => {
-        const billDate = new Date(b.created_at);
-        const matchesDate =
-          salesReportPeriod === 'daily'
-            ? billDate >= startOfToday
-            : billDate >= sevenDaysAgo;
+        const matchesDate = isBillInSelectedRange(b.created_at);
         return matchesDate && b.shop_id === shop.id;
       });
       const totalSales = shopPeriodBills.reduce(
         (s, b) => s + (Number(b.total_amount) || 0),
+        0
+      );
+      const cashSales = shopPeriodBills.reduce(
+        (s, b) => s + getBillPaymentAmounts(b).cash,
+        0
+      );
+      const upiSales = shopPeriodBills.reduce(
+        (s, b) => s + getBillPaymentAmounts(b).upi,
         0
       );
       const totalStockUnits = shopStocks
@@ -1587,11 +1777,23 @@ export default function App() {
         location: shop.location,
         billCount: shopPeriodBills.length,
         totalSales,
+        cashSales,
+        upiSales,
         totalStockUnits
       };
     });
 
+    const totalCashSales = filteredBills.reduce(
+      (s, b) => s + getBillPaymentAmounts(b).cash,
+      0
+    );
+    const totalUpiSales = filteredBills.reduce(
+      (s, b) => s + getBillPaymentAmounts(b).upi,
+      0
+    );
     const allShopsCombinedSales = shopRows.reduce((s, r) => s + r.totalSales, 0);
+    const allShopsCombinedCash = shopRows.reduce((s, r) => s + r.cashSales, 0);
+    const allShopsCombinedUpi = shopRows.reduce((s, r) => s + r.upiSales, 0);
     const grandTotalSales = categoryRows.reduce((s, r) => s + r.totalSales, 0);
     const grandTotalExpense = categoryRows.reduce((s, r) => s + r.expenseAmount, 0);
     const totalAllShopsStock = shopStocks.reduce(
@@ -1604,6 +1806,10 @@ export default function App() {
       categoryRows,
       shopRows,
       allShopsCombinedSales,
+      allShopsCombinedCash,
+      allShopsCombinedUpi,
+      totalCashSales,
+      totalUpiSales,
       grandTotalSales,
       grandTotalExpense,
       grandNetRevenue: grandTotalSales - grandTotalExpense,
@@ -1616,6 +1822,7 @@ export default function App() {
     shopStocks,
     shopCategoryExpenses,
     salesReportPeriod,
+    analyticsDate,
     effectiveAnalyticsShopId,
     isShopAdmin,
     currentLoggedInUser
@@ -1717,6 +1924,141 @@ export default function App() {
     return Array.from(map.values());
   }, [visiblePosItems]);
 
+  // Stock Alerts Data (Out of Stock & Out of Stock Soon — Grouped by Category & Flavour)
+  const stockAlertsData = useMemo(() => {
+    const threshold = Math.max(1, parseInt(lowStockThreshold, 10) || 5);
+    const targetShops = isShopAdmin
+      ? shops.filter((s) => s.id === currentLoggedInUser?.shop_id)
+      : shops;
+
+    const allAlerts = [];
+
+    if (targetShops.length > 0) {
+      targetShops.forEach((shop) => {
+        items.forEach((item) => {
+          const alloc = shopStocks.find(
+            (ss) => ss.shop_id === shop.id && ss.item_id === item.id
+          );
+          const stock = alloc ? Number(alloc.stock) : 0;
+          if (stock <= threshold) {
+            const cat = categories.find((c) => c.id === item.category_id);
+            const subcat = subcategories.find((sc) => sc.id === item.subcategory_id);
+            allAlerts.push({
+              key: `${shop.id}-${item.id}`,
+              shopId: shop.id,
+              shopName: shop.name,
+              categoryName: cat ? cat.name : 'Uncategorized',
+              flavourName: subcat ? subcat.name : item.name,
+              item,
+              stock,
+              status: stock === 0 ? 'OUT_OF_STOCK' : 'LOW_STOCK'
+            });
+          }
+        });
+      });
+    } else {
+      items.forEach((item) => {
+        const stock = Number(item.stock) || 0;
+        if (stock <= threshold) {
+          const cat = categories.find((c) => c.id === item.category_id);
+          const subcat = subcategories.find((sc) => sc.id === item.subcategory_id);
+          allAlerts.push({
+            key: `default-${item.id}`,
+            shopId: null,
+            shopName: 'Default Shop',
+            categoryName: cat ? cat.name : 'Uncategorized',
+            flavourName: subcat ? subcat.name : item.name,
+            item,
+            stock,
+            status: stock === 0 ? 'OUT_OF_STOCK' : 'LOW_STOCK'
+          });
+        }
+      });
+    }
+
+    const shopScopedAlerts =
+      isSuperAdmin && stockAlertShopFilter !== 'ALL'
+        ? allAlerts.filter((a) => a.shopId === stockAlertShopFilter)
+        : allAlerts;
+
+    const outOfStockCount = shopScopedAlerts.filter((a) => a.status === 'OUT_OF_STOCK').length;
+    const lowStockCount = shopScopedAlerts.filter((a) => a.status === 'LOW_STOCK').length;
+
+    const q = stockAlertSearchQuery.trim().toLowerCase();
+    const filteredAlerts = shopScopedAlerts.filter((a) => {
+      if (stockAlertStatusFilter !== 'ALL' && a.status !== stockAlertStatusFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        a.item.name.toLowerCase().includes(q) ||
+        a.flavourName.toLowerCase().includes(q) ||
+        a.categoryName.toLowerCase().includes(q) ||
+        a.shopName.toLowerCase().includes(q)
+      );
+    });
+
+    const catMap = new Map();
+    filteredAlerts.forEach((entry) => {
+      if (!catMap.has(entry.categoryName)) {
+        catMap.set(entry.categoryName, {
+          categoryName: entry.categoryName,
+          entries: [],
+          outOfStockCount: 0,
+          lowStockCount: 0,
+          flavourMap: new Map()
+        });
+      }
+      const group = catMap.get(entry.categoryName);
+      group.entries.push(entry);
+      if (entry.status === 'OUT_OF_STOCK') group.outOfStockCount += 1;
+      else group.lowStockCount += 1;
+
+      const fgKey = `${entry.shopId || 'default'}-${entry.flavourName.toLowerCase()}`;
+      if (!group.flavourMap.has(fgKey)) {
+        group.flavourMap.set(fgKey, {
+          key: fgKey,
+          shopId: entry.shopId,
+          shopName: entry.shopName,
+          flavourName: entry.flavourName,
+          entries: []
+        });
+      }
+      group.flavourMap.get(fgKey).entries.push(entry);
+    });
+
+    const groupedByCategory = Array.from(catMap.values())
+      .sort((a, b) => a.categoryName.localeCompare(b.categoryName))
+      .map(({ flavourMap, ...rest }) => ({
+        ...rest,
+        flavourGroups: Array.from(flavourMap.values()).sort((a, b) => {
+          const shopCmp = a.shopName.localeCompare(b.shopName);
+          return shopCmp !== 0 ? shopCmp : a.flavourName.localeCompare(b.flavourName);
+        })
+      }));
+
+    return {
+      threshold,
+      allAlerts,
+      outOfStockCount,
+      lowStockCount,
+      groupedByCategory
+    };
+  }, [
+    items,
+    shops,
+    shopStocks,
+    categories,
+    subcategories,
+    lowStockThreshold,
+    isShopAdmin,
+    isSuperAdmin,
+    currentLoggedInUser,
+    stockAlertShopFilter,
+    stockAlertStatusFilter,
+    stockAlertSearchQuery
+  ]);
+
   // Distinct filters + Date Picker for Dedicated Generated Bills Tab
   const visibleLedgerBills = useMemo(() => {
     const query = billSearchQuery.trim().toLowerCase();
@@ -1740,8 +2082,13 @@ export default function App() {
       }
 
       // Payment Mode Filter
-      if (billPaymentFilter !== 'ALL' && (bill.payment_method || 'Cash') !== billPaymentFilter) {
-        return false;
+      if (billPaymentFilter !== 'ALL') {
+        const billMode = bill.payment_method || 'Cash';
+        if (billPaymentFilter === 'Split') {
+          if (!billMode.startsWith('Split')) return false;
+        } else if (billMode !== billPaymentFilter) {
+          return false;
+        }
       }
 
       if (!query) return true;
@@ -1765,6 +2112,19 @@ export default function App() {
     isShopAdmin,
     currentLoggedInUser
   ]);
+
+  const ledgerPaymentTotals = useMemo(() => {
+    return visibleLedgerBills.reduce(
+      (acc, bill) => {
+        const { cash, upi } = getBillPaymentAmounts(bill);
+        acc.total += Number(bill.total_amount) || 0;
+        acc.cash += cash;
+        acc.upi += upi;
+        return acc;
+      },
+      { total: 0, cash: 0, upi: 0 }
+    );
+  }, [visibleLedgerBills]);
 
   // ============================================================================
   // FULL-SCREEN LOGIN GATE (FIRST PAGE BEFORE BILLING OR DASHBOARD)
@@ -1973,6 +2333,34 @@ export default function App() {
       ======================================================================== */}
       {activeRole === 'sales' && (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Mobile & Tablet Top-Right Cart Toggle Button */}
+          <div className="sticky top-[4.5rem] z-30 flex justify-end lg:hidden">
+            <button
+              type="button"
+              onClick={() => setIsMobileCartOpen((prev) => !prev)}
+              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-gradient-to-r from-purple-600 to-violet-700 hover:from-purple-500 hover:to-violet-600 text-white shadow-lg shadow-purple-700/25 text-xs sm:text-sm font-bold transition-all cursor-pointer"
+            >
+              <ShoppingCart className="w-4 h-4" />
+              <span>Cart</span>
+              <span className="px-2 py-0.5 rounded-full bg-white text-purple-800 text-xs font-extrabold">
+                {cart.reduce((s, c) => s + c.quantity, 0)}
+              </span>
+              {cart.length > 0 && (
+                <span className="border-l border-purple-400/60 pl-2 font-extrabold">
+                  ₹{cartSubtotal.toFixed(2)}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {/* Mobile & Tablet Backdrop when Top-Right Cart is Open */}
+          {isMobileCartOpen && (
+            <div
+              onClick={() => setIsMobileCartOpen(false)}
+              className="fixed inset-0 z-30 bg-slate-900/25 backdrop-blur-[1px] lg:hidden"
+            />
+          )}
+
           {/* Left Column: Product Catalog */}
           <div className="lg:col-span-7 xl:col-span-8 space-y-4">
             {/* Active Shop Sales Profile Banner */}
@@ -2281,7 +2669,13 @@ export default function App() {
           </div>
 
           {/* Right Column: Live Cart & Instant Paperless Bill */}
-          <div className="lg:col-span-5 xl:col-span-4 space-y-5">
+          <div
+            className={`${
+              isMobileCartOpen
+                ? 'fixed top-20 right-3 sm:right-6 z-40 w-[calc(100vw-1.5rem)] max-w-md max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl shadow-2xl'
+                : 'hidden'
+            } lg:static lg:block lg:w-auto lg:max-w-none lg:max-h-none lg:overflow-visible lg:shadow-none lg:col-span-5 xl:col-span-4 space-y-5`}
+          >
             {/* Active Cart Panel */}
             <div className="bg-white border border-purple-100 shadow-sm rounded-2xl p-5 flex flex-col">
               <div className="flex items-center justify-between pb-4 border-b border-purple-100">
@@ -2296,14 +2690,28 @@ export default function App() {
                     </p>
                   </div>
                 </div>
-                {cart.length > 0 && (
+                <div className="flex items-center gap-2">
+                  {cart.length > 0 && (
+                    <button
+                      onClick={() => {
+                        setCart([]);
+                        setSplitCashAmount('');
+                        setSplitUpiAmount('');
+                      }}
+                      className="text-xs text-rose-600 hover:text-rose-700 font-medium"
+                    >
+                      Cancel
+                    </button>
+                  )}
                   <button
-                    onClick={() => setCart([])}
-                    className="text-xs text-rose-600 hover:text-rose-700 font-medium"
+                    type="button"
+                    onClick={() => setIsMobileCartOpen(false)}
+                    aria-label="Close cart"
+                    className="lg:hidden p-1.5 rounded-lg bg-[#FAF8F5] hover:bg-purple-100 text-slate-600 hover:text-purple-900 border border-purple-100 transition-colors"
                   >
-                    Cancel
+                    <X className="w-4 h-4" />
                   </button>
-                )}
+                </div>
               </div>
 
               {/* Cart Items List with Thumbnail Images, Direct Quantity Edit & Delete */}
@@ -2407,37 +2815,121 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Compact Pill Payment Method Selector: Cash or UPI */}
-                <div className="flex items-center justify-between bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2">
-                  <span className="text-xs font-semibold text-slate-600">
-                    Payment Mode
-                  </span>
-                  <div className="inline-flex items-center bg-white p-0.5 rounded-lg border border-purple-200/80 shadow-2xs">
-                    <button
-                      type="button"
-                      onClick={() => setPaymentMethod('Cash')}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                        paymentMethod === 'Cash'
-                          ? 'bg-gradient-to-r from-purple-600 to-violet-700 text-white shadow-xs'
-                          : 'text-slate-600 hover:text-purple-900'
-                      }`}
-                    >
-                      <Banknote className="w-3.5 h-3.5" />
-                      <span>Cash</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPaymentMethod('UPI')}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
-                        paymentMethod === 'UPI'
-                          ? 'bg-gradient-to-r from-purple-600 to-violet-700 text-white shadow-xs'
-                          : 'text-slate-600 hover:text-purple-900'
-                      }`}
-                    >
-                      <QrCode className="w-3.5 h-3.5" />
-                      <span>UPI</span>
-                    </button>
+                {/* Compact Pill Payment Method Selector: Cash, UPI, or Split */}
+                <div className="bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-600">
+                      Payment Mode
+                    </span>
+                    <div className="inline-flex items-center bg-white p-0.5 rounded-lg border border-purple-200/80 shadow-2xs">
+                      <button
+                        type="button"
+                        onClick={() => setPaymentMethod('Cash')}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                          paymentMethod === 'Cash'
+                            ? 'bg-gradient-to-r from-purple-600 to-violet-700 text-white shadow-xs'
+                            : 'text-slate-600 hover:text-purple-900'
+                        }`}
+                      >
+                        <Banknote className="w-3.5 h-3.5" />
+                        <span>Cash</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPaymentMethod('UPI')}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                          paymentMethod === 'UPI'
+                            ? 'bg-gradient-to-r from-purple-600 to-violet-700 text-white shadow-xs'
+                            : 'text-slate-600 hover:text-purple-900'
+                        }`}
+                      >
+                        <QrCode className="w-3.5 h-3.5" />
+                        <span>UPI</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPaymentMethod('Split')}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                          paymentMethod === 'Split'
+                            ? 'bg-gradient-to-r from-purple-600 to-violet-700 text-white shadow-xs'
+                            : 'text-slate-600 hover:text-purple-900'
+                        }`}
+                      >
+                        <ArrowRightLeft className="w-3.5 h-3.5" />
+                        <span>Split</span>
+                      </button>
+                    </div>
                   </div>
+
+                  {paymentMethod === 'Split' && (
+                    <div className="pt-2 border-t border-purple-100 space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1 flex items-center gap-1">
+                            <Banknote className="w-3 h-3 text-purple-600" />
+                            Cash (₹)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max={cartSubtotal}
+                            placeholder="0.00"
+                            value={splitCashAmount}
+                            onChange={(e) => handleSplitCashChange(e.target.value)}
+                            className="w-full bg-white border border-purple-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-purple-950 focus:outline-none focus:border-purple-600"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-600 mb-1 flex items-center gap-1">
+                            <QrCode className="w-3 h-3 text-purple-600" />
+                            UPI (₹)
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max={cartSubtotal}
+                            placeholder="0.00"
+                            value={splitUpiAmount}
+                            onChange={(e) => handleSplitUpiChange(e.target.value)}
+                            className="w-full bg-white border border-purple-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-purple-950 focus:outline-none focus:border-purple-600"
+                          />
+                        </div>
+                      </div>
+                      {cartSubtotal > 0 && (
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-slate-500">
+                            Split Sum: ₹
+                            {(
+                              (parseFloat(splitCashAmount) || 0) +
+                              (parseFloat(splitUpiAmount) || 0)
+                            ).toFixed(2)}
+                          </span>
+                          {Math.abs(
+                            (parseFloat(splitCashAmount) || 0) +
+                              (parseFloat(splitUpiAmount) || 0) -
+                              cartSubtotal
+                          ) <= 0.01 &&
+                          (parseFloat(splitCashAmount) || 0) > 0 &&
+                          (parseFloat(splitUpiAmount) || 0) > 0 ? (
+                            <span className="font-semibold text-emerald-700">
+                              Matched
+                            </span>
+                          ) : (
+                            <span className="font-semibold text-amber-700">
+                              Remaining: ₹
+                              {(
+                                cartSubtotal -
+                                ((parseFloat(splitCashAmount) || 0) +
+                                  (parseFloat(splitUpiAmount) || 0))
+                              ).toFixed(2)}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <button
@@ -2446,7 +2938,7 @@ export default function App() {
                   className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-purple-600 to-violet-700 hover:from-purple-500 hover:to-violet-600 disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 text-white font-bold text-sm shadow-lg shadow-purple-600/20 disabled:shadow-none transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                 >
                   <CheckCircle2 className="w-5 h-5" />
-                  Generate Live Bill ({paymentMethod})
+                  Generate Live Bill ({paymentMethod === 'Split' ? 'Cash + UPI' : paymentMethod})
                 </button>
               </div>
             </div>
@@ -2471,15 +2963,19 @@ export default function App() {
                       {new Date(latestGeneratedBill.created_at).toLocaleString()}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <span>Payment Mode:</span>
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-100 text-purple-900 font-semibold">
-                      {latestGeneratedBill.payment_method === 'UPI' ? (
-                        <QrCode className="w-3 h-3" />
+                      {latestGeneratedBill.payment_method?.startsWith('Split') ? (
+                        <ArrowRightLeft className="w-3 h-3 shrink-0" />
+                      ) : latestGeneratedBill.payment_method === 'UPI' ? (
+                        <QrCode className="w-3 h-3 shrink-0" />
                       ) : (
-                        <Banknote className="w-3 h-3" />
+                        <Banknote className="w-3 h-3 shrink-0" />
                       )}
-                      {latestGeneratedBill.payment_method || 'Cash'}
+                      {latestGeneratedBill.payment_method === 'Split'
+                        ? `Split (Cash: ₹${Number(latestGeneratedBill.cash_amount || 0).toFixed(2)}, UPI: ₹${Number(latestGeneratedBill.upi_amount || 0).toFixed(2)})`
+                        : latestGeneratedBill.payment_method || 'Cash'}
                     </span>
                   </div>
                 </div>
@@ -2548,6 +3044,29 @@ export default function App() {
               >
                 <Receipt className="w-4 h-4" />
                 Generated Bills
+              </button>
+
+              <button
+                onClick={() => setAdminTab('stock-alerts')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+                  adminTab === 'stock-alerts'
+                    ? 'bg-purple-700 text-white shadow-sm'
+                    : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
+                }`}
+              >
+                <AlertCircle className="w-4 h-4" />
+                <span>Stock Alerts</span>
+                {stockAlertsData.allAlerts.length > 0 && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                      adminTab === 'stock-alerts'
+                        ? 'bg-white text-purple-800'
+                        : 'bg-rose-100 text-rose-700'
+                    }`}
+                  >
+                    {stockAlertsData.allAlerts.length}
+                  </span>
+                )}
               </button>
 
               {isSuperAdmin && (
@@ -2639,34 +3158,46 @@ export default function App() {
                   </h2>
                   <p className="text-sm text-slate-500">
                     {salesReportPeriod === 'daily'
-                      ? 'Today’s live sales breakdown'
-                      : 'Last 7 days sales overview'}
+                      ? `Sales breakdown for ${analyticsDate || 'today'}`
+                      : `7-day sales overview ending ${analyticsDate || 'today'}`}
                   </p>
                 </div>
 
-                <div className="inline-flex bg-white p-1 rounded-xl border border-purple-100 shadow-xs self-start">
-                  <button
-                    onClick={() => setSalesReportPeriod('daily')}
-                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
-                      salesReportPeriod === 'daily'
-                        ? 'bg-purple-700 text-white'
-                        : 'text-slate-600 hover:text-purple-900'
-                    }`}
-                  >
-                    <Calendar className="w-4 h-4" />
-                    Daily View (Today)
-                  </button>
-                  <button
-                    onClick={() => setSalesReportPeriod('weekly')}
-                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
-                      salesReportPeriod === 'weekly'
-                        ? 'bg-purple-700 text-white'
-                        : 'text-slate-600 hover:text-purple-900'
-                    }`}
-                  >
-                    <TrendingUp className="w-4 h-4" />
-                    Weekly View (Last 7 Days)
-                  </button>
+                <div className="flex flex-wrap items-center gap-2.5 self-start">
+                  <div className="flex items-center gap-1.5 bg-white border border-purple-200 rounded-xl px-3 py-2 shadow-xs">
+                    <Calendar className="w-4 h-4 text-purple-600" />
+                    <input
+                      type="date"
+                      value={analyticsDate}
+                      onChange={(e) => setAnalyticsDate(e.target.value)}
+                      className="bg-transparent text-xs sm:text-sm font-semibold text-purple-950 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="inline-flex bg-white p-1 rounded-xl border border-purple-100 shadow-xs">
+                    <button
+                      onClick={() => setSalesReportPeriod('daily')}
+                      className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
+                        salesReportPeriod === 'daily'
+                          ? 'bg-purple-700 text-white'
+                          : 'text-slate-600 hover:text-purple-900'
+                      }`}
+                    >
+                      <Calendar className="w-4 h-4" />
+                      Daily View
+                    </button>
+                    <button
+                      onClick={() => setSalesReportPeriod('weekly')}
+                      className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
+                        salesReportPeriod === 'weekly'
+                          ? 'bg-purple-700 text-white'
+                          : 'text-slate-600 hover:text-purple-900'
+                      }`}
+                    >
+                      <TrendingUp className="w-4 h-4" />
+                      Weekly View (7 Days)
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -2690,6 +3221,16 @@ export default function App() {
                   <p className="text-xs text-slate-500 mt-1">
                     {analyticsData.filteredBills.length} bills generated in the selected period
                   </p>
+                  <div className="flex flex-wrap items-center gap-2 mt-2.5 pt-2.5 border-t border-purple-50 text-xs font-semibold">
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#FAF8F5] border border-purple-100 text-purple-900">
+                      <Banknote className="w-3.5 h-3.5 text-purple-600" />
+                      Cash: ₹{analyticsData.totalCashSales.toFixed(2)}
+                    </span>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#FAF8F5] border border-purple-100 text-purple-900">
+                      <QrCode className="w-3.5 h-3.5 text-purple-600" />
+                      UPI: ₹{analyticsData.totalUpiSales.toFixed(2)}
+                    </span>
+                  </div>
                 </div>
 
                 {!isAllShopsAnalyticsSelected && (
@@ -2745,6 +3286,8 @@ export default function App() {
                           <th className="py-3.5 px-5">Shop Name</th>
                           <th className="py-3.5 px-4">Assigned Sales Profile</th>
                           <th className="py-3.5 px-4 text-right">Bills Count</th>
+                          <th className="py-3.5 px-4 text-right">Cash (₹)</th>
+                          <th className="py-3.5 px-4 text-right">UPI (₹)</th>
                           <th className="py-3.5 px-5 text-right">Amount (₹)</th>
                         </tr>
                       </thead>
@@ -2767,6 +3310,12 @@ export default function App() {
                             <td className="py-3.5 px-4 text-right text-slate-600">
                               {sr.billCount}
                             </td>
+                            <td className="py-3.5 px-4 text-right font-medium text-slate-700">
+                              ₹{sr.cashSales.toFixed(2)}
+                            </td>
+                            <td className="py-3.5 px-4 text-right font-medium text-slate-700">
+                              ₹{sr.upiSales.toFixed(2)}
+                            </td>
                             <td className="py-3.5 px-5 text-right font-bold text-purple-950">
                               ₹{sr.totalSales.toFixed(2)}
                             </td>
@@ -2778,6 +3327,12 @@ export default function App() {
                           </td>
                           <td className="py-3.5 px-4 text-right">
                             {analyticsData.shopRows.reduce((s, r) => s + r.billCount, 0)}
+                          </td>
+                          <td className="py-3.5 px-4 text-right text-purple-900">
+                            ₹{analyticsData.allShopsCombinedCash.toFixed(2)}
+                          </td>
+                          <td className="py-3.5 px-4 text-right text-purple-900">
+                            ₹{analyticsData.allShopsCombinedUpi.toFixed(2)}
                           </td>
                           <td className="py-3.5 px-5 text-right text-base text-purple-800">
                             ₹{analyticsData.allShopsCombinedSales.toFixed(2)}
@@ -2899,7 +3454,15 @@ export default function App() {
                   <p className="text-xs text-slate-500 mt-0.5">
                     Showing <strong className="text-purple-900">{visibleLedgerBills.length}</strong> bills • Filtered Total:{' '}
                     <strong className="text-purple-900">
-                      ₹{visibleLedgerBills.reduce((s, b) => s + (Number(b.total_amount) || 0), 0).toFixed(2)}
+                      ₹{ledgerPaymentTotals.total.toFixed(2)}
+                    </strong>{' '}
+                    • Cash:{' '}
+                    <strong className="text-purple-900">
+                      ₹{ledgerPaymentTotals.cash.toFixed(2)}
+                    </strong>{' '}
+                    • UPI:{' '}
+                    <strong className="text-purple-900">
+                      ₹{ledgerPaymentTotals.upi.toFixed(2)}
                     </strong>
                   </p>
                 </div>
@@ -2938,7 +3501,7 @@ export default function App() {
                   </div>
 
                   <div className="inline-flex bg-[#FAF8F5] p-0.5 rounded-xl border border-purple-200">
-                    {['ALL', 'Cash', 'UPI'].map((mode) => (
+                    {['ALL', 'Cash', 'UPI', 'Split'].map((mode) => (
                       <button
                         key={mode}
                         type="button"
@@ -3012,12 +3575,16 @@ export default function App() {
                               </span>
                             )}
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-purple-100 text-purple-800">
-                              {bill.payment_method === 'UPI' ? (
+                              {bill.payment_method?.startsWith('Split') ? (
+                                <ArrowRightLeft className="w-3 h-3" />
+                              ) : bill.payment_method === 'UPI' ? (
                                 <QrCode className="w-3 h-3" />
                               ) : (
                                 <Banknote className="w-3 h-3" />
                               )}
-                              {bill.payment_method || 'Cash'}
+                              {bill.payment_method === 'Split'
+                                ? `Split (Cash: ₹${Number(bill.cash_amount || 0).toFixed(2)}, UPI: ₹${Number(bill.upi_amount || 0).toFixed(2)})`
+                                : bill.payment_method || 'Cash'}
                             </span>
                             <span className="text-xs text-slate-500">
                               {new Date(bill.created_at).toLocaleString()}
@@ -3045,7 +3612,288 @@ export default function App() {
             </div>
           )}
 
-          {/* SUPER ADMIN TAB: STOCK UPDATE (CASCADING DROPDOWNS & NON-COLLAPSIBLE TREE SECTIONS) */}
+          {/* STOCK ALERTS TAB (ADMIN & SHOP-ADMIN: OUT OF STOCK & OUT OF STOCK SOON — GROUPED BY CATEGORY & FLAVOUR) */}
+          {adminTab === 'stock-alerts' && (isSuperAdmin || isShopAdmin) && (
+            <div className="space-y-5">
+              {/* Summary KPI Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    Total Stock Alerts
+                  </span>
+                  <div className="text-2xl sm:text-3xl font-extrabold text-purple-950 mt-2">
+                    {stockAlertsData.outOfStockCount + stockAlertsData.lowStockCount}
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1">
+                    {isShopAdmin
+                      ? `For ${currentActiveShop?.name || 'your shop'}`
+                      : stockAlertShopFilter === 'ALL'
+                      ? 'Across all shops'
+                      : `For ${shops.find((s) => s.id === stockAlertShopFilter)?.name || 'selected shop'}`}
+                  </p>
+                </div>
+
+                <div className="bg-rose-50 border border-rose-200 shadow-xs rounded-2xl p-5">
+                  <span className="text-xs font-bold uppercase tracking-wider text-rose-700 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    Out of Stock (0 units)
+                  </span>
+                  <div className="text-2xl sm:text-3xl font-extrabold text-rose-700 mt-2">
+                    {stockAlertsData.outOfStockCount}
+                  </div>
+                  <p className="text-xs text-rose-700/80 mt-1">
+                    Requires immediate restocking
+                  </p>
+                </div>
+
+                <div className="bg-amber-50 border border-amber-200 shadow-xs rounded-2xl p-5">
+                  <span className="text-xs font-bold uppercase tracking-wider text-amber-800 flex items-center gap-1.5">
+                    <Package className="w-3.5 h-3.5" />
+                    Out of Stock Soon (1–{stockAlertsData.threshold} units)
+                  </span>
+                  <div className="text-2xl sm:text-3xl font-extrabold text-amber-700 mt-2">
+                    {stockAlertsData.lowStockCount}
+                  </div>
+                  <p className="text-xs text-amber-800/80 mt-1">
+                    Running low — plan restock soon
+                  </p>
+                </div>
+              </div>
+
+              {/* Filter Bar */}
+              <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-purple-950 text-base flex items-center gap-2">
+                    <AlertCircle className="w-5 h-5 text-rose-600" />
+                    Stock Alerts (Grouped by Category & Flavour)
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    View out-of-stock and low-stock items grouped by category and flavour, and restock inline.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {/* Status Filter Pills */}
+                  <div className="inline-flex bg-[#FAF8F5] p-0.5 rounded-xl border border-purple-200">
+                    {[
+                      { id: 'ALL', label: 'All Alerts' },
+                      { id: 'OUT_OF_STOCK', label: 'Out of Stock' },
+                      { id: 'LOW_STOCK', label: 'Soon' }
+                    ].map((tab) => (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setStockAlertStatusFilter(tab.id)}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                          stockAlertStatusFilter === tab.id
+                            ? 'bg-purple-700 text-white'
+                            : 'text-slate-600 hover:text-purple-900'
+                        }`}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Low-Stock Threshold Input */}
+                  <div className="flex items-center gap-1.5 bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1">
+                    <span className="text-[11px] font-semibold text-slate-500">Soon ≤</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={lowStockThreshold}
+                      onChange={(e) => setLowStockThreshold(e.target.value)}
+                      className="w-12 bg-white border border-purple-200 rounded-md px-1.5 py-0.5 text-center text-xs font-bold text-purple-950 focus:outline-none focus:border-purple-600"
+                    />
+                  </div>
+
+                  {/* Search */}
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="Search item, flavour..."
+                      value={stockAlertSearchQuery}
+                      onChange={(e) => setStockAlertSearchQuery(e.target.value)}
+                      className="bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white w-40 sm:w-48"
+                    />
+                  </div>
+
+                  {/* Shop Filter (Super Admin Only) */}
+                  {isSuperAdmin && shops.length > 0 && (
+                    <select
+                      value={stockAlertShopFilter}
+                      onChange={(e) => setStockAlertShopFilter(e.target.value)}
+                      className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                    >
+                      <option value="ALL">All Shops</option>
+                      {shops.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              </div>
+
+              {/* Grouped by Category -> Flavour Rows */}
+              {stockAlertsData.groupedByCategory.length === 0 ? (
+                <div className="bg-white border border-dashed border-purple-200 rounded-2xl p-10 text-center">
+                  <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-2" />
+                  <h4 className="text-base font-bold text-purple-950">All stocked up!</h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    No out-of-stock or low-stock items match the current filters.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {stockAlertsData.groupedByCategory.map((group) => {
+                    const catDirtyUpdates = group.entries
+                      .filter((entry) => Boolean(entry.shopId))
+                      .map((entry) => {
+                        const draftKey = `${entry.shopId}::${entry.item.id}`;
+                        const hasDraft = Object.prototype.hasOwnProperty.call(
+                          alertStockDrafts,
+                          draftKey
+                        );
+                        if (!hasDraft || alertStockDrafts[draftKey] === '') return null;
+                        const parsed = Math.max(0, parseInt(alertStockDrafts[draftKey], 10) || 0);
+                        if (parsed === Number(entry.stock)) return null;
+                        return {
+                          shopId: entry.shopId,
+                          itemId: entry.item.id,
+                          stock: parsed
+                        };
+                      })
+                      .filter(Boolean);
+
+                    return (
+                      <div
+                        key={group.categoryName}
+                        className="bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden"
+                      >
+                        <div className="px-5 py-3.5 bg-purple-50/70 border-b border-purple-100 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-purple-950 text-sm">
+                              {group.categoryName}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-white border border-purple-200 text-purple-800">
+                              {group.entries.length}{' '}
+                              {group.entries.length === 1 ? 'alert' : 'alerts'}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                            {group.outOfStockCount > 0 && (
+                              <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 border border-rose-200">
+                                Out of Stock: {group.outOfStockCount}
+                              </span>
+                            )}
+                            {group.lowStockCount > 0 && (
+                              <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
+                                Soon: {group.lowStockCount}
+                              </span>
+                            )}
+                            {group.entries.some((e) => Boolean(e.shopId)) && (
+                              <button
+                                type="button"
+                                disabled={catDirtyUpdates.length === 0}
+                                onClick={() =>
+                                  handleBatchUpdateShopStock(catDirtyUpdates, 'alerts')
+                                }
+                                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                                  catDirtyUpdates.length > 0
+                                    ? 'bg-purple-700 hover:bg-purple-600 text-white shadow-sm cursor-pointer'
+                                    : 'bg-white border border-purple-200/70 text-slate-400 cursor-not-allowed'
+                                }`}
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>
+                                  {catDirtyUpdates.length > 0
+                                    ? `Update (${catDirtyUpdates.length})`
+                                    : 'Update'}
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="bg-[#FAF8F5] border-b border-purple-100 text-[11px] uppercase tracking-wider text-slate-500">
+                                {isSuperAdmin && shops.length > 0 && (
+                                  <th className="py-2.5 px-4 w-40">Shop</th>
+                                )}
+                                <th className="py-2.5 px-4 w-48">Flavour / Item</th>
+                                <th className="py-2.5 px-4">Types, Status & Quick Restock</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-purple-50 text-sm">
+                              {group.flavourGroups.map((fg) => (
+                                <tr
+                                  key={`${group.categoryName}-${fg.key}`}
+                                  className="hover:bg-[#FAF8F5]/70 align-middle"
+                                >
+                                  {isSuperAdmin && shops.length > 0 && (
+                                    <td className="py-2.5 px-4">
+                                      <span className="px-2.5 py-1 rounded-md bg-purple-100 text-purple-900 text-xs font-semibold">
+                                        {fg.shopName}
+                                      </span>
+                                    </td>
+                                  )}
+                                  <td className="py-2.5 px-4 font-bold text-purple-950 text-xs sm:text-sm">
+                                    {fg.flavourName}
+                                  </td>
+                                  <td className="py-2.5 px-4">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      {fg.entries.map((entry) => {
+                                        const draftKey = entry.shopId
+                                          ? `${entry.shopId}::${entry.item.id}`
+                                          : null;
+                                        const draftValue =
+                                          draftKey &&
+                                          Object.prototype.hasOwnProperty.call(
+                                            alertStockDrafts,
+                                            draftKey
+                                          )
+                                            ? alertStockDrafts[draftKey]
+                                            : entry.stock;
+
+                                        return (
+                                          <SingleRowStockAlertItemEditor
+                                            key={entry.key}
+                                            entry={entry}
+                                            value={draftValue}
+                                            onChange={
+                                              draftKey
+                                                ? (val) =>
+                                                    setAlertStockDrafts((prev) => ({
+                                                      ...prev,
+                                                      [draftKey]: val
+                                                    }))
+                                                : null
+                                            }
+                                          />
+                                        );
+                                      })}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SUPER ADMIN TAB: STOCK UPDATE (CASCADING DROPDOWNS & FLAVOUR-GROUPED ROWS) */}
           {adminTab === 'shops' && isSuperAdmin && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
               {/* Left Column: Assign Stock to Shop (Shop -> Category -> Flavour -> Item Type -> Count) */}
@@ -3162,15 +4010,37 @@ export default function App() {
                 </form>
               </div>
 
-              {/* Right Column: Manage Inventory Tree View (Shop -> Category -> Flavour -> Same-Row Edit) */}
+              {/* Right Column: Manage Inventory (Shop -> Category -> Flavour Grouped Rows) */}
               <div className="lg:col-span-8 space-y-5">
-                <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5">
-                  <h3 className="font-bold text-purple-950 text-base">
-                    Manage Inventory (Shop → Category → Flavour)
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Separate inventory sections grouped by Shop, Category, and Flavour with inline stock updates.
-                  </p>
+                <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-purple-950 text-base">
+                      Manage Inventory (Shop → Category → Flavour)
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Separate inventory sections grouped by Shop, Category, and Flavour with category-level stock updates.
+                    </p>
+                  </div>
+                  {shops.length > 0 && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                        <Store className="w-3.5 h-3.5 text-purple-600" />
+                        Shop:
+                      </span>
+                      <select
+                        value={stockUpdateShopFilter}
+                        onChange={(e) => setStockUpdateShopFilter(e.target.value)}
+                        className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                      >
+                        <option value="ALL">All Shops</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} ({s.sales_profile_name})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
 
                 {shops.length === 0 || categories.length === 0 ? (
@@ -3179,7 +4049,12 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-6">
-                    {shops.map((shop) => (
+                    {shops
+                      .filter(
+                        (shop) =>
+                          stockUpdateShopFilter === 'ALL' || shop.id === stockUpdateShopFilter
+                      )
+                      .map((shop) => (
                       <div
                         key={shop.id}
                         className="bg-white border border-purple-200 shadow-xs rounded-2xl overflow-hidden"
@@ -3238,62 +4113,126 @@ export default function App() {
                               });
                             });
 
+                            const catDirtyUpdates = catItems
+                              .map((it) => {
+                                const draftKey = `${shop.id}::${it.id}`;
+                                const hasDraft = Object.prototype.hasOwnProperty.call(
+                                  stockDrafts,
+                                  draftKey
+                                );
+                                if (!hasDraft || stockDrafts[draftKey] === '') return null;
+                                const alloc = shopStocks.find(
+                                  (ss) => ss.shop_id === shop.id && ss.item_id === it.id
+                                );
+                                const currentStock = alloc ? Number(alloc.stock) : 0;
+                                const parsed = Math.max(
+                                  0,
+                                  parseInt(stockDrafts[draftKey], 10) || 0
+                                );
+                                if (parsed === currentStock) return null;
+                                return {
+                                  shopId: shop.id,
+                                  itemId: it.id,
+                                  stock: parsed
+                                };
+                              })
+                              .filter(Boolean);
+
                             return (
                               <div
                                 key={`${shop.id}-${cat.id}`}
                                 className="border border-purple-100 rounded-xl overflow-hidden"
                               >
-                                <div className="px-4 py-2.5 bg-purple-50 border-b border-purple-100 flex items-center justify-between">
+                                <div className="px-4 py-2.5 bg-purple-50 border-b border-purple-100 flex flex-wrap items-center justify-between gap-2">
                                   <span className="font-bold text-purple-950 text-xs sm:text-sm">
                                     Category: {cat.name}
                                   </span>
-                                  <span className="text-xs font-semibold text-purple-700">
-                                    Category Stock:{' '}
-                                    {catItems.reduce((sum, it) => {
-                                      const alloc = shopStocks.find(
-                                        (ss) =>
-                                          ss.shop_id === shop.id && ss.item_id === it.id
-                                      );
-                                      return sum + (Number(alloc?.stock) || 0);
-                                    }, 0)}
-                                  </span>
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-xs font-semibold text-purple-700">
+                                      Category Stock:{' '}
+                                      {catItems.reduce((sum, it) => {
+                                        const alloc = shopStocks.find(
+                                          (ss) =>
+                                            ss.shop_id === shop.id && ss.item_id === it.id
+                                        );
+                                        return sum + (Number(alloc?.stock) || 0);
+                                      }, 0)}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      disabled={catDirtyUpdates.length === 0}
+                                      onClick={() =>
+                                        handleBatchUpdateShopStock(catDirtyUpdates, 'stock')
+                                      }
+                                      className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                                        catDirtyUpdates.length > 0
+                                          ? 'bg-purple-700 hover:bg-purple-600 text-white shadow-sm cursor-pointer'
+                                          : 'bg-white border border-purple-200/70 text-slate-400 cursor-not-allowed'
+                                      }`}
+                                    >
+                                      <CheckCircle2 className="w-3.5 h-3.5" />
+                                      <span>
+                                        {catDirtyUpdates.length > 0
+                                          ? `Update (${catDirtyUpdates.length})`
+                                          : 'Update'}
+                                      </span>
+                                    </button>
+                                  </div>
                                 </div>
 
                                 <div className="overflow-x-auto">
                                   <table className="w-full text-left border-collapse">
                                     <thead>
                                       <tr className="bg-[#FAF8F5] border-b border-purple-100 text-[11px] uppercase tracking-wider text-slate-500">
-                                        <th className="py-2.5 px-4">Flavour / Item</th>
-                                        <th className="py-2.5 px-4">Item Type</th>
-                                        <th className="py-2.5 px-4">Price</th>
-                                        <th className="py-2.5 px-4 text-right">Stock Count & Update</th>
+                                        <th className="py-2.5 px-4 w-48">Flavour / Item</th>
+                                        <th className="py-2.5 px-4">Types, Price & Stock Count</th>
                                       </tr>
                                     </thead>
                                     <tbody className="divide-y divide-purple-50 text-sm">
-                                      {flavourGroups.flatMap((fg) =>
-                                        fg.items.map((item, idx) => {
-                                          const alloc = shopStocks.find(
-                                            (ss) =>
-                                              ss.shop_id === shop.id &&
-                                              ss.item_id === item.id
-                                          );
-                                          return (
-                                            <TreeStockEditRow
-                                              key={`${shop.id}-${cat.id}-${item.id}`}
-                                              flavourLabel={idx === 0 ? fg.flavourName : ''}
-                                              item={item}
-                                              stock={alloc ? Number(alloc.stock) : 0}
-                                              onUpdate={(val) =>
-                                                handleUpdateShopStockDirect(
-                                                  shop.id,
-                                                  item.id,
-                                                  val
+                                      {flavourGroups.map((fg) => (
+                                        <tr
+                                          key={`${shop.id}-${cat.id}-${fg.key}`}
+                                          className="hover:bg-[#FAF8F5]/70 align-middle"
+                                        >
+                                          <td className="py-2.5 px-4 font-bold text-purple-950 text-xs sm:text-sm">
+                                            {fg.flavourName}
+                                          </td>
+                                          <td className="py-2.5 px-4">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              {fg.items.map((item) => {
+                                                const alloc = shopStocks.find(
+                                                  (ss) =>
+                                                    ss.shop_id === shop.id &&
+                                                    ss.item_id === item.id
+                                                );
+                                                const currentStock = alloc ? Number(alloc.stock) : 0;
+                                                const draftKey = `${shop.id}::${item.id}`;
+                                                const draftValue = Object.prototype.hasOwnProperty.call(
+                                                  stockDrafts,
+                                                  draftKey
                                                 )
-                                              }
-                                            />
-                                          );
-                                        })
-                                      )}
+                                                  ? stockDrafts[draftKey]
+                                                  : currentStock;
+
+                                                return (
+                                                  <SingleRowStockItemEditor
+                                                    key={`${shop.id}-${cat.id}-${item.id}`}
+                                                    item={item}
+                                                    stock={currentStock}
+                                                    value={draftValue}
+                                                    onChange={(val) =>
+                                                      setStockDrafts((prev) => ({
+                                                        ...prev,
+                                                        [draftKey]: val
+                                                      }))
+                                                    }
+                                                  />
+                                                );
+                                              })}
+                                            </div>
+                                          </td>
+                                        </tr>
+                                      ))}
                                     </tbody>
                                   </table>
                                 </div>
@@ -3610,7 +4549,6 @@ export default function App() {
                       );
 
                       const flavourRows = [];
-                      console.log('catSubcats', catSubcats);
                       catSubcats.forEach((sc) => {
                         const scItems = catItems.filter(
                           (it) => String(it.subcategory_id) === String(sc.id)
@@ -3792,7 +4730,7 @@ export default function App() {
             </div>
           )}
 
-          {/* SHOP-ADMIN TAB: MY SHOP STOCK (SEPARATE TABLES PER CATEGORY, GROUPED BY FLAVOUR, SAME-ROW EDIT) */}
+          {/* SHOP-ADMIN TAB: MY SHOP STOCK (SEPARATE TABLES PER CATEGORY, GROUPED BY FLAVOUR, CATEGORY-LEVEL UPDATE) */}
           {adminTab === 'shop-stock' && isShopAdmin && currentActiveShop && (
             <div className="space-y-5">
               <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 flex flex-wrap items-center justify-between gap-2">
@@ -3801,7 +4739,7 @@ export default function App() {
                     My Shop Stock — {currentActiveShop.name}
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Separate category tables grouped by flavour with inline stock updates.
+                    Separate category tables grouped by flavour with category-level stock updates.
                   </p>
                 </div>
                 <span className="px-3 py-1 rounded-xl bg-purple-100 text-purple-900 text-xs font-bold">
@@ -3853,62 +4791,127 @@ export default function App() {
                       });
                     });
 
+                    const catDirtyUpdates = catItems
+                      .map((it) => {
+                        const draftKey = `${currentActiveShop.id}::${it.id}`;
+                        const hasDraft = Object.prototype.hasOwnProperty.call(
+                          stockDrafts,
+                          draftKey
+                        );
+                        if (!hasDraft || stockDrafts[draftKey] === '') return null;
+                        const alloc = shopStocks.find(
+                          (ss) =>
+                            ss.shop_id === currentActiveShop.id && ss.item_id === it.id
+                        );
+                        const currentStock = alloc ? Number(alloc.stock) : 0;
+                        const parsed = Math.max(
+                          0,
+                          parseInt(stockDrafts[draftKey], 10) || 0
+                        );
+                        if (parsed === currentStock) return null;
+                        return {
+                          shopId: currentActiveShop.id,
+                          itemId: it.id,
+                          stock: parsed
+                        };
+                      })
+                      .filter(Boolean);
+
                     return (
                       <div
                         key={`shop-admin-${cat.id}`}
                         className="bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden"
                       >
-                        <div className="px-5 py-3.5 bg-purple-50/80 border-b border-purple-100 flex items-center justify-between">
+                        <div className="px-5 py-3.5 bg-purple-50/80 border-b border-purple-100 flex flex-wrap items-center justify-between gap-2">
                           <span className="font-bold text-purple-950 text-sm">
                             {cat.name}
                           </span>
-                          <span className="text-xs font-semibold text-purple-700">
-                            Category Stock:{' '}
-                            {catItems.reduce((sum, it) => {
-                              const alloc = shopStocks.find(
-                                (ss) =>
-                                  ss.shop_id === currentActiveShop.id && ss.item_id === it.id
-                              );
-                              return sum + (Number(alloc?.stock) || 0);
-                            }, 0)}
-                          </span>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-semibold text-purple-700">
+                              Category Stock:{' '}
+                              {catItems.reduce((sum, it) => {
+                                const alloc = shopStocks.find(
+                                  (ss) =>
+                                    ss.shop_id === currentActiveShop.id && ss.item_id === it.id
+                                );
+                                return sum + (Number(alloc?.stock) || 0);
+                              }, 0)}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={catDirtyUpdates.length === 0}
+                              onClick={() =>
+                                handleBatchUpdateShopStock(catDirtyUpdates, 'stock')
+                              }
+                              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                                catDirtyUpdates.length > 0
+                                  ? 'bg-purple-700 hover:bg-purple-600 text-white shadow-sm cursor-pointer'
+                                  : 'bg-white border border-purple-200/70 text-slate-400 cursor-not-allowed'
+                              }`}
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>
+                                {catDirtyUpdates.length > 0
+                                  ? `Update (${catDirtyUpdates.length})`
+                                  : 'Update'}
+                              </span>
+                            </button>
+                          </div>
                         </div>
 
                         <div className="overflow-x-auto">
                           <table className="w-full text-left border-collapse">
                             <thead>
                               <tr className="bg-[#FAF8F5] border-b border-purple-100 text-[11px] uppercase tracking-wider text-slate-500">
-                                <th className="py-2.5 px-5">Flavour / Item</th>
-                                <th className="py-2.5 px-4">Item Type</th>
-                                <th className="py-2.5 px-4">Price</th>
-                                <th className="py-2.5 px-5 text-right">Available Count & Update</th>
+                                <th className="py-2.5 px-4 w-48">Flavour / Item</th>
+                                <th className="py-2.5 px-4">Types, Price & Stock Count</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-purple-50 text-sm">
-                              {flavourGroups.flatMap((fg) =>
-                                fg.items.map((item, idx) => {
-                                  const alloc = shopStocks.find(
-                                    (ss) =>
-                                      ss.shop_id === currentActiveShop.id &&
-                                      ss.item_id === item.id
-                                  );
-                                  return (
-                                    <TreeStockEditRow
-                                      key={`shop-admin-${cat.id}-${item.id}`}
-                                      flavourLabel={idx === 0 ? fg.flavourName : ''}
-                                      item={item}
-                                      stock={alloc ? Number(alloc.stock) : 0}
-                                      onUpdate={(val) =>
-                                        handleUpdateShopStockDirect(
-                                          currentActiveShop.id,
-                                          item.id,
-                                          val
+                              {flavourGroups.map((fg) => (
+                                <tr
+                                  key={`shop-admin-${cat.id}-${fg.key}`}
+                                  className="hover:bg-[#FAF8F5]/70 align-middle"
+                                >
+                                  <td className="py-2.5 px-4 font-bold text-purple-950 text-xs sm:text-sm">
+                                    {fg.flavourName}
+                                  </td>
+                                  <td className="py-2.5 px-4">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      {fg.items.map((item) => {
+                                        const alloc = shopStocks.find(
+                                          (ss) =>
+                                            ss.shop_id === currentActiveShop.id &&
+                                            ss.item_id === item.id
+                                        );
+                                        const currentStock = alloc ? Number(alloc.stock) : 0;
+                                        const draftKey = `${currentActiveShop.id}::${item.id}`;
+                                        const draftValue = Object.prototype.hasOwnProperty.call(
+                                          stockDrafts,
+                                          draftKey
                                         )
-                                      }
-                                    />
-                                  );
-                                })
-                              )}
+                                          ? stockDrafts[draftKey]
+                                          : currentStock;
+
+                                        return (
+                                          <SingleRowStockItemEditor
+                                            key={`shop-admin-${cat.id}-${item.id}`}
+                                            item={item}
+                                            stock={currentStock}
+                                            value={draftValue}
+                                            onChange={(val) =>
+                                              setStockDrafts((prev) => ({
+                                                ...prev,
+                                                [draftKey]: val
+                                              }))
+                                            }
+                                          />
+                                        );
+                                      })}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
                             </tbody>
                           </table>
                         </div>
@@ -4121,6 +5124,113 @@ export default function App() {
           )}
         </main>
       )}
+    </div>
+  );
+}
+
+// Inline Single-Row Flavour Alert Item Editor (Used in Stock Alerts Grouped View)
+function SingleRowStockAlertItemEditor({ entry, value, onChange }) {
+  const isOut = entry.status === 'OUT_OF_STOCK';
+  const isDirty = value !== '' && Number(value) !== Number(entry.stock);
+
+  return (
+    <div
+      className={`inline-flex flex-wrap items-center gap-2.5 rounded-xl px-3 py-2 shrink-0 border transition-all ${
+        isDirty
+          ? 'bg-purple-50/70 border-purple-400 ring-1 ring-purple-300/70'
+          : isOut
+          ? 'bg-rose-50/60 border-rose-200/80'
+          : 'bg-amber-50/60 border-amber-200/80'
+      }`}
+    >
+      {/* Non-editable read-only item metadata */}
+      <div className="flex items-center gap-2">
+        <div className="flex flex-col leading-tight">
+          <span className="text-xs sm:text-sm font-bold text-slate-800">
+            {entry.item.name}
+          </span>
+          <span className="text-[11px] font-medium text-slate-500">
+            ₹{Number(entry.item.price).toFixed(2)}
+          </span>
+        </div>
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+            isOut
+              ? 'bg-rose-100/90 text-rose-800 border-rose-200'
+              : 'bg-amber-100/90 text-amber-800 border-amber-200'
+          }`}
+        >
+          <AlertCircle className="w-3 h-3" />
+          {isOut ? 'Out' : `${entry.stock} left`}
+        </span>
+      </div>
+
+      {/* Editable stock count */}
+      {onChange ? (
+        <div className="flex items-center gap-1.5 pl-2.5 border-l border-purple-200/70">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+            Qty
+          </span>
+          <input
+            type="number"
+            min="0"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            className={`w-16 rounded-lg px-2 py-1 text-center text-sm font-bold focus:outline-none transition-colors ${
+              isDirty
+                ? 'bg-white border-2 border-purple-600 text-purple-950'
+                : 'bg-white border border-purple-200 text-purple-950 focus:border-purple-600'
+            }`}
+          />
+        </div>
+      ) : (
+        <span className="text-xs font-bold text-slate-800 pl-2 border-l border-purple-200/70">
+          {entry.stock}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Inline Single-Row Flavour Stock Item Editor (Used in Stock Update Grouped View)
+function SingleRowStockItemEditor({ item, stock, value, onChange }) {
+  const isDirty = value !== '' && Number(value) !== Number(stock);
+
+  return (
+    <div
+      className={`inline-flex flex-wrap items-center gap-2.5 rounded-xl px-3 py-2 shrink-0 border transition-all ${
+        isDirty
+          ? 'bg-purple-50/70 border-purple-400 ring-1 ring-purple-300/70'
+          : 'bg-[#FAF8F5] border-purple-100'
+      }`}
+    >
+      {/* Non-editable read-only item metadata */}
+      <div className="flex flex-col leading-tight">
+        <span className="text-xs sm:text-sm font-bold text-slate-800">
+          {item.name}
+        </span>
+        <span className="text-[11px] font-medium text-slate-500">
+          ₹{Number(item.price).toFixed(2)}
+        </span>
+      </div>
+
+      {/* Editable stock count */}
+      <div className="flex items-center gap-1.5 pl-2.5 border-l border-purple-200/70">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          Qty
+        </span>
+        <input
+          type="number"
+          min="0"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className={`w-16 rounded-lg px-2 py-1 text-center text-sm font-bold focus:outline-none transition-colors ${
+            isDirty
+              ? 'bg-white border-2 border-purple-600 text-purple-950'
+              : 'bg-white border border-purple-200 text-purple-950 focus:border-purple-600'
+          }`}
+        />
+      </div>
     </div>
   );
 }

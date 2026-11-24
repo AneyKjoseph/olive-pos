@@ -160,3 +160,23 @@ CREATE POLICY "Allow all operations on app_users" ON app_users FOR ALL USING (tr
 INSERT INTO app_users (username, password, role, shop_id)
 VALUES ('admin', 'admin123', 'admin', NULL)
 ON CONFLICT (username) DO NOTHING;
+
+
+
+ALTER TABLE public.bills
+DROP CONSTRAINT IF EXISTS bills_payment_method_check;
+
+ALTER TABLE public.bills
+ADD CONSTRAINT bills_payment_method_check
+CHECK (payment_method IN ('Cash', 'UPI', 'Split'));
+
+ALTER TABLE public.bills
+ADD COLUMN IF NOT EXISTS cash_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
+ADD COLUMN IF NOT EXISTS upi_amount NUMERIC(10, 2) NOT NULL DEFAULT 0;
+
+-- Backfill existing Cash and UPI bills so historical cash & UPI totals stay in sync
+UPDATE public.bills
+SET
+  cash_amount = CASE WHEN payment_method = 'Cash' THEN total_amount ELSE cash_amount END,
+  upi_amount = CASE WHEN payment_method = 'UPI' THEN total_amount ELSE upi_amount END
+WHERE cash_amount = 0 AND upi_amount = 0;
