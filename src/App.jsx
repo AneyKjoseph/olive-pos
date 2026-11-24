@@ -208,6 +208,12 @@ export default function App() {
   const [billPaymentFilter, setBillPaymentFilter] = useState('ALL');
   const [billShopFilter, setBillShopFilter] = useState('ALL');
 
+  // Stock Alerts Tab Filters (Out of Stock & Out of Stock Soon)
+  const [stockAlertStatusFilter, setStockAlertStatusFilter] = useState('ALL');
+  const [stockAlertShopFilter, setStockAlertShopFilter] = useState('ALL');
+  const [stockAlertThreshold, setStockAlertThreshold] = useState(2);
+  const [stockAlertSearch, setStockAlertSearch] = useState('');
+
   // Public folder logo fallback flag (/logo.png)
   const [logoLoadFailed, setLogoLoadFailed] = useState(false);
 
@@ -1766,6 +1772,130 @@ export default function App() {
     currentLoggedInUser
   ]);
 
+  // Stock Alerts Data (Out of Stock & Out of Stock Soon) for Admin & Shop-Admin
+  const stockAlertsData = useMemo(() => {
+    const threshold = Math.max(1, parseInt(stockAlertThreshold, 10) || 5);
+    const query = stockAlertSearch.trim().toLowerCase();
+
+    const scopedShops = isShopAdmin
+      ? shops.filter((s) => s.id === currentLoggedInUser?.shop_id)
+      : isSuperAdmin && stockAlertShopFilter !== 'ALL'
+      ? shops.filter((s) => s.id === stockAlertShopFilter)
+      : shops;
+
+    const allAlerts = [];
+
+    if (scopedShops.length > 0) {
+      scopedShops.forEach((shop) => {
+        items.forEach((item) => {
+          const alloc = shopStocks.find(
+            (ss) => ss.shop_id === shop.id && ss.item_id === item.id
+          );
+          const stock = alloc ? Number(alloc.stock) : 0;
+          if (stock > threshold) return;
+
+          const status = stock <= 0 ? 'OUT_OF_STOCK' : 'LOW_STOCK';
+          const cat = categories.find((c) => c.id === item.category_id);
+          const subcat = subcategories.find((sc) => sc.id === item.subcategory_id);
+
+          allAlerts.push({
+            key: `${shop.id}-${item.id}`,
+            shopId: shop.id,
+            shopName: shop.name,
+            item,
+            categoryName: cat?.name || 'Uncategorized',
+            subcategoryName: subcat?.name || '',
+            stock,
+            status
+          });
+        });
+      });
+    } else if (shops.length === 0) {
+      items.forEach((item) => {
+        const stock = Number(item.stock) || 0;
+        if (stock > threshold) return;
+
+        const status = stock <= 0 ? 'OUT_OF_STOCK' : 'LOW_STOCK';
+        const cat = categories.find((c) => c.id === item.category_id);
+        const subcat = subcategories.find((sc) => sc.id === item.subcategory_id);
+
+        allAlerts.push({
+          key: `default-${item.id}`,
+          shopId: null,
+          shopName: 'Default Store',
+          item,
+          categoryName: cat?.name || 'Uncategorized',
+          subcategoryName: subcat?.name || '',
+          stock,
+          status
+        });
+      });
+    }
+
+    const outOfStockCount = allAlerts.filter((a) => a.status === 'OUT_OF_STOCK').length;
+    const lowStockCount = allAlerts.filter((a) => a.status === 'LOW_STOCK').length;
+
+    const filteredAlerts = allAlerts
+      .filter((entry) => {
+        if (stockAlertStatusFilter !== 'ALL' && entry.status !== stockAlertStatusFilter) {
+          return false;
+        }
+        if (!query) return true;
+        return (
+          entry.item.name.toLowerCase().includes(query) ||
+          entry.categoryName.toLowerCase().includes(query) ||
+          entry.subcategoryName.toLowerCase().includes(query) ||
+          entry.shopName.toLowerCase().includes(query)
+        );
+      })
+      .sort((a, b) => a.stock - b.stock || a.item.name.localeCompare(b.item.name));
+
+    const groupedByCategoryMap = new Map();
+    filteredAlerts.forEach((entry) => {
+      const catKey = entry.categoryName || 'Uncategorized';
+      if (!groupedByCategoryMap.has(catKey)) {
+        groupedByCategoryMap.set(catKey, {
+          categoryName: catKey,
+          outOfStockCount: 0,
+          lowStockCount: 0,
+          entries: []
+        });
+      }
+      const group = groupedByCategoryMap.get(catKey);
+      if (entry.status === 'OUT_OF_STOCK') {
+        group.outOfStockCount += 1;
+      } else {
+        group.lowStockCount += 1;
+      }
+      group.entries.push(entry);
+    });
+    const groupedByCategory = Array.from(groupedByCategoryMap.values()).sort((a, b) =>
+      a.categoryName.localeCompare(b.categoryName)
+    );
+
+    return {
+      allAlerts,
+      filteredAlerts,
+      groupedByCategory,
+      outOfStockCount,
+      lowStockCount,
+      totalAlertsCount: allAlerts.length
+    };
+  }, [
+    shops,
+    items,
+    shopStocks,
+    categories,
+    subcategories,
+    isSuperAdmin,
+    isShopAdmin,
+    currentLoggedInUser,
+    stockAlertShopFilter,
+    stockAlertStatusFilter,
+    stockAlertThreshold,
+    stockAlertSearch
+  ]);
+
   // ============================================================================
   // FULL-SCREEN LOGIN GATE (FIRST PAGE BEFORE BILLING OR DASHBOARD)
   // ============================================================================
@@ -2550,6 +2680,29 @@ export default function App() {
                 Generated Bills
               </button>
 
+              <button
+                onClick={() => setAdminTab('stock-alerts')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+                  adminTab === 'stock-alerts'
+                    ? 'bg-purple-700 text-white shadow-sm'
+                    : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
+                }`}
+              >
+                <AlertCircle className="w-4 h-4" />
+                <span>Stock Alerts</span>
+                {stockAlertsData.totalAlertsCount > 0 && (
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
+                      adminTab === 'stock-alerts'
+                        ? 'bg-white/20 text-white'
+                        : 'bg-rose-100 text-rose-700'
+                    }`}
+                  >
+                    {stockAlertsData.totalAlertsCount}
+                  </span>
+                )}
+              </button>
+
               {isSuperAdmin && (
                 <>
                   <button
@@ -3042,6 +3195,214 @@ export default function App() {
                   })}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* TAB FOR ADMIN & SHOP-ADMIN: OUT OF STOCK & OUT OF STOCK SOON */}
+          {adminTab === 'stock-alerts' && (
+            <div className="space-y-5">
+              {/* Summary KPI Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="bg-rose-50 border border-rose-200 shadow-xs rounded-2xl p-5 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-rose-700">
+                      Out of Stock Items
+                    </span>
+                    <div className="text-3xl font-extrabold text-rose-800 mt-1">
+                      {stockAlertsData.outOfStockCount}
+                    </div>
+                    <p className="text-xs text-rose-600/90 mt-0.5">
+                      Items with 0 units available
+                    </p>
+                  </div>
+                  <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center">
+                    <AlertCircle className="w-6 h-6" />
+                  </div>
+                </div>
+
+                <div className="bg-amber-50 border border-amber-200 shadow-xs rounded-2xl p-5 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-amber-800">
+                      Out of Stock Soon
+                    </span>
+                    <div className="text-3xl font-extrabold text-amber-900 mt-1">
+                      {stockAlertsData.lowStockCount}
+                    </div>
+                    <p className="text-xs text-amber-700 mt-0.5">
+                      Items with 1 or {Math.max(1, parseInt(stockAlertThreshold, 10) || 5)} units left
+                    </p>
+                  </div>
+                  <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center">
+                    <Package className="w-6 h-6" />
+                  </div>
+                </div>
+              </div>
+
+              {/* Filter Bar & Alerts Table */}
+              <div className="bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
+                <div className="p-5 border-b border-purple-100 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div>
+                    <h3 className="font-bold text-purple-950 text-lg flex items-center gap-2">
+                      <AlertCircle className="w-5 h-5 text-rose-600" />
+                      Stock Alerts
+                      {isShopAdmin && currentActiveShop && (
+                        <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-purple-100 text-purple-800">
+                          {currentActiveShop.name}
+                        </span>
+                      )}
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Monitor items that are completely out of stock or running low and restock inline.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {/* Status Filter Pills */}
+                    <div className="inline-flex bg-[#FAF8F5] p-0.5 rounded-xl border border-purple-200">
+                      {[
+                        { id: 'ALL', label: `All (${stockAlertsData.totalAlertsCount})` },
+                        { id: 'OUT_OF_STOCK', label: `Out of Stock (${stockAlertsData.outOfStockCount})` },
+                        { id: 'LOW_STOCK', label: `Out of Stock Soon (${stockAlertsData.lowStockCount})` }
+                      ].map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setStockAlertStatusFilter(opt.id)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
+                            stockAlertStatusFilter === opt.id
+                              ? 'bg-purple-700 text-white'
+                              : 'text-slate-600 hover:text-purple-900'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Low Stock Threshold Input */}
+                    <div className="flex items-center gap-1.5 bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1">
+                      <span className="text-[11px] font-semibold text-slate-600">Soon ≤</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="100"
+                        value={stockAlertThreshold}
+                        onChange={(e) => setStockAlertThreshold(e.target.value)}
+                        className="w-12 bg-white border border-purple-200 rounded-md px-1.5 py-0.5 text-center text-xs font-bold text-purple-950 focus:outline-none focus:border-purple-600"
+                      />
+                    </div>
+
+                    {/* Search Input */}
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        placeholder="Search item, flavour..."
+                        value={stockAlertSearch}
+                        onChange={(e) => setStockAlertSearch(e.target.value)}
+                        className="bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white w-40 sm:w-48"
+                      />
+                    </div>
+
+                    {/* Shop Filter for Super Admin */}
+                    {isSuperAdmin && shops.length > 0 && (
+                      <select
+                        value={stockAlertShopFilter}
+                        onChange={(e) => setStockAlertShopFilter(e.target.value)}
+                        className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                      >
+                        <option value="ALL">All Shops</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </div>
+
+                {stockAlertsData.filteredAlerts.length === 0 ? (
+                  <div className="p-10 text-center">
+                    <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto mb-2" />
+                    <p className="text-sm font-bold text-slate-700">
+                      No items found matching the current filters.
+                    </p>
+                    <p className="text-xs text-slate-400 mt-1">
+                      No out-of-stock or low-stock items found for the current filters.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="p-4 space-y-4">
+                    {stockAlertsData.groupedByCategory.map((group) => (
+                      <div
+                        key={group.categoryName}
+                        className="border border-purple-100 rounded-xl overflow-hidden"
+                      >
+                        <div className="px-4 py-3 bg-purple-50/80 border-b border-purple-100 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <Layers className="w-4 h-4 text-purple-600" />
+                            <span className="font-bold text-purple-950 text-sm">
+                              {group.categoryName}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-white border border-purple-200 text-purple-800">
+                              {group.entries.length}{' '}
+                              {group.entries.length === 1 ? 'alert' : 'alerts'}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {group.outOfStockCount > 0 && (
+                              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                                Out of Stock: {group.outOfStockCount}
+                              </span>
+                            )}
+                            {group.lowStockCount > 0 && (
+                              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                                Soon: {group.lowStockCount}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="bg-[#FAF8F5] border-b border-purple-100 text-[11px] uppercase tracking-wider text-slate-500">
+                                {isSuperAdmin && shops.length > 0 && (
+                                  <th className="py-2.5 px-4">Shop</th>
+                                )}
+                                <th className="py-2.5 px-4">Flavour / Item</th>
+                                <th className="py-2.5 px-4">Item Type</th>
+                                <th className="py-2.5 px-4">Status</th>
+                                <th className="py-2.5 px-4 text-right">Stock & Quick Restock</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-purple-50 text-sm">
+                              {group.entries.map((entry) => (
+                                <StockAlertRow
+                                  key={entry.key}
+                                  entry={entry}
+                                  showShopColumn={isSuperAdmin && shops.length > 0}
+                                  onUpdateStock={
+                                    entry.shopId
+                                      ? (newVal) =>
+                                          handleUpdateShopStockDirect(
+                                            entry.shopId,
+                                            entry.item.id,
+                                            newVal
+                                          )
+                                      : null
+                                  }
+                                />
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -4122,6 +4483,77 @@ export default function App() {
         </main>
       )}
     </div>
+  );
+}
+
+// Helper Component for Stock Alerts Tab Rows (Out of Stock & Out of Stock Soon)
+function StockAlertRow({ entry, showShopColumn, onUpdateStock }) {
+  const [qty, setQty] = useState(entry.stock);
+  const isDirty = Number(qty) !== Number(entry.stock);
+
+  useEffect(() => {
+    setQty(entry.stock);
+  }, [entry.stock]);
+
+  return (
+    <tr className="hover:bg-[#FAF8F5]/80">
+      {showShopColumn && (
+        <td className="py-3 px-4">
+          <span className="px-2.5 py-1 rounded-md bg-purple-100 text-purple-900 text-xs font-semibold">
+            {entry.shopName}
+          </span>
+        </td>
+      )}
+      <td className="py-3 px-4 font-bold text-purple-950 text-sm">
+        {entry.subcategoryName || '—'}
+      </td>
+      <td className="py-3 px-4 font-semibold text-slate-900 text-sm">
+        {entry.item.name}
+        <span className="block text-xs font-normal text-slate-500">
+          ₹{Number(entry.item.price).toFixed(2)}
+        </span>
+      </td>
+      <td className="py-3 px-4">
+        {entry.status === 'OUT_OF_STOCK' ? (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-800 border border-rose-200">
+            <AlertCircle className="w-3.5 h-3.5" />
+            Out of Stock
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200">
+            <AlertCircle className="w-3.5 h-3.5" />
+            Out of Stock Soon ({entry.stock} left)
+          </span>
+        )}
+      </td>
+      <td className="py-3 px-4 text-right">
+        {onUpdateStock ? (
+          <div className="inline-flex items-center gap-2">
+            <input
+              type="number"
+              min="0"
+              value={qty}
+              onChange={(e) => setQty(e.target.value)}
+              className="w-20 bg-[#FAF8F5] border border-purple-200 rounded-lg px-2.5 py-1 text-center text-sm font-bold text-purple-950 focus:outline-none focus:border-purple-600 focus:bg-white"
+            />
+            <button
+              type="button"
+              disabled={!isDirty}
+              onClick={() => onUpdateStock(qty)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                isDirty
+                  ? 'bg-purple-700 hover:bg-purple-600 text-white shadow-xs cursor-pointer'
+                  : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+              }`}
+            >
+              Update
+            </button>
+          </div>
+        ) : (
+          <span className="font-bold text-slate-800">{entry.stock}</span>
+        )}
+      </td>
+    </tr>
   );
 }
 
