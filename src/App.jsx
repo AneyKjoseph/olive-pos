@@ -154,10 +154,12 @@ export default function App() {
   const [stockAlertStatusFilter, setStockAlertStatusFilter] = useState('ALL');
   const [stockAlertShopFilter, setStockAlertShopFilter] = useState('ALL');
   const [stockAlertSearchQuery, setStockAlertSearchQuery] = useState('');
-  const [lowStockThreshold, setLowStockThreshold] = useState(5);
+  const [lowStockThreshold, setLowStockThreshold] = useState(2);
 
   // Stock Update Shop Filter & Category-Level Draft Stock Maps
   const [stockUpdateShopFilter, setStockUpdateShopFilter] = useState('ALL');
+  const [stockUpdateSearchQuery, setStockUpdateSearchQuery] = useState('');
+  const [menuEditorSearchQuery, setMenuEditorSearchQuery] = useState('');
   const [stockDrafts, setStockDrafts] = useState({});
   const [alertStockDrafts, setAlertStockDrafts] = useState({});
 
@@ -3713,11 +3715,21 @@ export default function App() {
                     <Search className="w-3.5 h-3.5 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
-                      placeholder="Search item, flavour..."
+                      placeholder="Search category, flavour, item..."
                       value={stockAlertSearchQuery}
                       onChange={(e) => setStockAlertSearchQuery(e.target.value)}
-                      className="bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white w-40 sm:w-48"
+                      className="bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-7 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white w-44 sm:w-56"
                     />
+                    {stockAlertSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setStockAlertSearchQuery('')}
+                        aria-label="Clear stock alerts search"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
 
                   {/* Shop Filter (Super Admin Only) */}
@@ -4021,26 +4033,48 @@ export default function App() {
                       Separate inventory sections grouped by Shop, Category, and Flavour with category-level stock updates.
                     </p>
                   </div>
-                  {shops.length > 0 && (
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
-                        <Store className="w-3.5 h-3.5 text-purple-600" />
-                        Shop:
-                      </span>
-                      <select
-                        value={stockUpdateShopFilter}
-                        onChange={(e) => setStockUpdateShopFilter(e.target.value)}
-                        className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
-                      >
-                        <option value="ALL">All Shops</option>
-                        {shops.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} ({s.sales_profile_name})
-                          </option>
-                        ))}
-                      </select>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        placeholder="Search category, flavour, item..."
+                        value={stockUpdateSearchQuery}
+                        onChange={(e) => setStockUpdateSearchQuery(e.target.value)}
+                        className="bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-7 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white w-44 sm:w-52"
+                      />
+                      {stockUpdateSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setStockUpdateSearchQuery('')}
+                          aria-label="Clear stock update search"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
-                  )}
+                    {shops.length > 0 && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                          <Store className="w-3.5 h-3.5 text-purple-600" />
+                          Shop:
+                        </span>
+                        <select
+                          value={stockUpdateShopFilter}
+                          onChange={(e) => setStockUpdateShopFilter(e.target.value)}
+                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                        >
+                          <option value="ALL">All Shops</option>
+                          {shops.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name} ({s.sales_profile_name})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {shops.length === 0 || categories.length === 0 ? (
@@ -4054,31 +4088,13 @@ export default function App() {
                         (shop) =>
                           stockUpdateShopFilter === 'ALL' || shop.id === stockUpdateShopFilter
                       )
-                      .map((shop) => (
-                      <div
-                        key={shop.id}
-                        className="bg-white border border-purple-200 shadow-xs rounded-2xl overflow-hidden"
-                      >
-                        {/* Shop Section Header */}
-                        <div className="px-5 py-3.5 bg-purple-900 text-white flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <Store className="w-4 h-4 text-purple-200" />
-                            <span className="font-bold text-sm">{shop.name}</span>
-                            <span className="text-xs text-purple-200">
-                              ({shop.sales_profile_name})
-                            </span>
-                          </div>
-                          <span className="text-xs font-semibold bg-purple-800 px-2.5 py-0.5 rounded-full">
-                            Total Shop Stock:{' '}
-                            {shopStocks
-                              .filter((ss) => ss.shop_id === shop.id)
-                              .reduce((sum, ss) => sum + (Number(ss.stock) || 0), 0)}
-                          </span>
-                        </div>
+                      .map((shop) => {
+                        const searchQ = stockUpdateSearchQuery.trim().toLowerCase();
+                        const shopMatchesSearch =
+                          !searchQ || shop.name.toLowerCase().includes(searchQ);
 
-                        {/* Separate Category Sections Inside Shop */}
-                        <div className="p-4 space-y-4">
-                          {categories.map((cat) => {
+                        const visibleCategoryBlocks = categories
+                          .map((cat) => {
                             const catItems = items.filter(
                               (it) => String(it.category_id) === String(cat.id)
                             );
@@ -4112,6 +4128,26 @@ export default function App() {
                                 items: [it]
                               });
                             });
+
+                            const catMatchesSearch =
+                              shopMatchesSearch || cat.name.toLowerCase().includes(searchQ);
+                            const filteredFlavourGroups = catMatchesSearch
+                              ? flavourGroups
+                              : flavourGroups
+                                  .map((fg) => {
+                                    if (fg.flavourName.toLowerCase().includes(searchQ)) {
+                                      return fg;
+                                    }
+                                    const matchedItems = fg.items.filter((it) =>
+                                      it.name.toLowerCase().includes(searchQ)
+                                    );
+                                    return matchedItems.length > 0
+                                      ? { ...fg, items: matchedItems }
+                                      : null;
+                                  })
+                                  .filter(Boolean);
+
+                            if (filteredFlavourGroups.length === 0) return null;
 
                             const catDirtyUpdates = catItems
                               .map((it) => {
@@ -4189,7 +4225,7 @@ export default function App() {
                                       </tr>
                                     </thead>
                                     <tbody className="divide-y divide-purple-50 text-sm">
-                                      {flavourGroups.map((fg) => (
+                                      {filteredFlavourGroups.map((fg) => (
                                         <tr
                                           key={`${shop.id}-${cat.id}-${fg.key}`}
                                           className="hover:bg-[#FAF8F5]/70 align-middle"
@@ -4238,10 +4274,44 @@ export default function App() {
                                 </div>
                               </div>
                             );
-                          })}
-                        </div>
-                      </div>
-                    ))}
+                          })
+                          .filter(Boolean);
+
+                        return (
+                          <div
+                            key={shop.id}
+                            className="bg-white border border-purple-200 shadow-xs rounded-2xl overflow-hidden"
+                          >
+                            {/* Shop Section Header */}
+                            <div className="px-5 py-3.5 bg-purple-900 text-white flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <Store className="w-4 h-4 text-purple-200" />
+                                <span className="font-bold text-sm">{shop.name}</span>
+                                <span className="text-xs text-purple-200">
+                                  ({shop.sales_profile_name})
+                                </span>
+                              </div>
+                              <span className="text-xs font-semibold bg-purple-800 px-2.5 py-0.5 rounded-full">
+                                Total Shop Stock:{' '}
+                                {shopStocks
+                                  .filter((ss) => ss.shop_id === shop.id)
+                                  .reduce((sum, ss) => sum + (Number(ss.stock) || 0), 0)}
+                              </span>
+                            </div>
+
+                            {/* Separate Category Sections Inside Shop */}
+                            <div className="p-4 space-y-4">
+                              {visibleCategoryBlocks.length === 0 ? (
+                                <div className="text-center py-6 text-xs text-slate-400">
+                                  No items matching "{stockUpdateSearchQuery}" in {shop.name}.
+                                </div>
+                              ) : (
+                                visibleCategoryBlocks
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                   </div>
                 )}
               </div>
@@ -4525,22 +4595,45 @@ export default function App() {
 
               {/* Right Column: Tabular Grouped-by-Category View (Each Flavour's Data in a Single Row, No Images) */}
               <div className="lg:col-span-8 space-y-5">
-                <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5">
-                  <h3 className="font-bold text-purple-950 text-base">
-                    Update Details (Grouped by Category)
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Edit unit prices for any item and change the category for unbilled items directly in each row.
-                  </p>
+                <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-purple-950 text-base">
+                      Update Details (Grouped by Category)
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Edit unit prices for any item and change the category for unbilled items directly in each row.
+                    </p>
+                  </div>
+                  <div className="relative shrink-0">
+                    <Search className="w-3.5 h-3.5 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="Search category, flavour, item..."
+                      value={menuEditorSearchQuery}
+                      onChange={(e) => setMenuEditorSearchQuery(e.target.value)}
+                      className="bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-7 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white w-full sm:w-56"
+                    />
+                    {menuEditorSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setMenuEditorSearchQuery('')}
+                        aria-label="Clear menu editor search"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {categories.length === 0 ? (
                   <div className="bg-white border border-dashed border-purple-200 rounded-2xl p-10 text-center text-xs text-slate-400">
                     No categories yet.
                   </div>
-                ) : (
-                  <div className="space-y-5">
-                    {categories.map((cat) => {
+                ) : (() => {
+                  const menuSearchQ = menuEditorSearchQuery.trim().toLowerCase();
+                  const visibleMenuCategoryCards = categories
+                    .map((cat) => {
                       const catItems = items.filter(
                         (it) => String(it.category_id) === String(cat.id)
                       );
@@ -4575,6 +4668,28 @@ export default function App() {
                           items: [it]
                         });
                       });
+
+                      const catMatchesSearch =
+                        !menuSearchQ || cat.name.toLowerCase().includes(menuSearchQ);
+                      const filteredFlavourRows = catMatchesSearch
+                        ? flavourRows
+                        : flavourRows
+                            .map((row) => {
+                              if (row.flavourName.toLowerCase().includes(menuSearchQ)) {
+                                return row;
+                              }
+                              const matchedItems = row.items.filter((it) =>
+                                it.name.toLowerCase().includes(menuSearchQ)
+                              );
+                              return matchedItems.length > 0
+                                ? { ...row, items: matchedItems }
+                                : null;
+                            })
+                            .filter(Boolean);
+
+                      if (menuSearchQ && !catMatchesSearch && filteredFlavourRows.length === 0) {
+                        return null;
+                      }
 
                       const categoryHasBilledItems =
                         catItems.some((it) => billedItemIds.has(it.id)) ||
@@ -4642,7 +4757,7 @@ export default function App() {
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-purple-50 text-sm">
-                                {flavourRows.length === 0 ? (
+                                {filteredFlavourRows.length === 0 ? (
                                   <tr>
                                     <td
                                       colSpan={2}
@@ -4652,7 +4767,7 @@ export default function App() {
                                     </td>
                                   </tr>
                                 ) : (
-                                  flavourRows.map((row) => {
+                                  filteredFlavourRows.map((row) => {
                                     const subcatHasBilledItems =
                                       Boolean(row.subcategoryObj) &&
                                       (row.items.some((it) => billedItemIds.has(it.id)) ||
@@ -4723,9 +4838,17 @@ export default function App() {
                           </div>
                         </div>
                       );
-                    })}
-                  </div>
-                )}
+                    })
+                    .filter(Boolean);
+
+                  return visibleMenuCategoryCards.length === 0 ? (
+                    <div className="bg-white border border-dashed border-purple-200 rounded-2xl p-10 text-center text-xs text-slate-400">
+                      No menu items matching "{menuEditorSearchQuery}".
+                    </div>
+                  ) : (
+                    <div className="space-y-5">{visibleMenuCategoryCards}</div>
+                  );
+                })()}
               </div>
             </div>
           )}
