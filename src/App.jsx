@@ -153,11 +153,13 @@ export default function App() {
   // Stock Alerts Tab Filters
   const [stockAlertStatusFilter, setStockAlertStatusFilter] = useState('ALL');
   const [stockAlertShopFilter, setStockAlertShopFilter] = useState('ALL');
+  const [stockAlertCategoryFilter, setStockAlertCategoryFilter] = useState('ALL');
   const [stockAlertSearchQuery, setStockAlertSearchQuery] = useState('');
-  const [lowStockThreshold, setLowStockThreshold] = useState(2);
+  const [lowStockThreshold, setLowStockThreshold] = useState(5);
 
   // Stock Update Shop Filter & Category-Level Draft Stock Maps
   const [stockUpdateShopFilter, setStockUpdateShopFilter] = useState('ALL');
+  const [stockUpdateCategoryFilter, setStockUpdateCategoryFilter] = useState('ALL');
   const [stockUpdateSearchQuery, setStockUpdateSearchQuery] = useState('');
   const [menuEditorSearchQuery, setMenuEditorSearchQuery] = useState('');
   const [stockDrafts, setStockDrafts] = useState({});
@@ -1978,10 +1980,18 @@ export default function App() {
       });
     }
 
-    const shopScopedAlerts =
-      isSuperAdmin && stockAlertShopFilter !== 'ALL'
-        ? allAlerts.filter((a) => a.shopId === stockAlertShopFilter)
-        : allAlerts;
+    const shopScopedAlerts = allAlerts.filter((a) => {
+      if (isSuperAdmin && stockAlertShopFilter !== 'ALL' && a.shopId !== stockAlertShopFilter) {
+        return false;
+      }
+      if (
+        stockAlertCategoryFilter !== 'ALL' &&
+        String(a.item.category_id) !== String(stockAlertCategoryFilter)
+      ) {
+        return false;
+      }
+      return true;
+    });
 
     const outOfStockCount = shopScopedAlerts.filter((a) => a.status === 'OUT_OF_STOCK').length;
     const lowStockCount = shopScopedAlerts.filter((a) => a.status === 'LOW_STOCK').length;
@@ -2057,6 +2067,7 @@ export default function App() {
     isSuperAdmin,
     currentLoggedInUser,
     stockAlertShopFilter,
+    stockAlertCategoryFilter,
     stockAlertStatusFilter,
     stockAlertSearchQuery
   ]);
@@ -3732,6 +3743,22 @@ export default function App() {
                     )}
                   </div>
 
+                  {/* Category Filter */}
+                  {categories.length > 0 && (
+                    <select
+                      value={stockAlertCategoryFilter}
+                      onChange={(e) => setStockAlertCategoryFilter(e.target.value)}
+                      className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                    >
+                      <option value="ALL">All Categories</option>
+                      {categories.map((cat) => (
+                        <option key={cat.id} value={cat.id}>
+                          {cat.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
                   {/* Shop Filter (Super Admin Only) */}
                   {isSuperAdmin && shops.length > 0 && (
                     <select
@@ -4024,7 +4051,7 @@ export default function App() {
 
               {/* Right Column: Manage Inventory (Shop -> Category -> Flavour Grouped Rows) */}
               <div className="lg:col-span-8 space-y-5">
-                <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-3.5">
                   <div>
                     <h3 className="font-bold text-purple-950 text-base">
                       Manage Inventory (Shop → Category → Flavour)
@@ -4033,15 +4060,15 @@ export default function App() {
                       Separate inventory sections grouped by Shop, Category, and Flavour with category-level stock updates.
                     </p>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <div className="relative">
+                  <div className="flex flex-wrap items-center gap-2.5 pt-3 border-t border-purple-50">
+                    <div className="relative flex-1 min-w-[180px]">
                       <Search className="w-3.5 h-3.5 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
                       <input
                         type="text"
                         placeholder="Search category, flavour, item..."
                         value={stockUpdateSearchQuery}
                         onChange={(e) => setStockUpdateSearchQuery(e.target.value)}
-                        className="bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-7 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white w-44 sm:w-52"
+                        className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-7 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
                       />
                       {stockUpdateSearchQuery && (
                         <button
@@ -4054,8 +4081,28 @@ export default function App() {
                         </button>
                       )}
                     </div>
+                    {categories.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                          <Layers className="w-3.5 h-3.5 text-purple-600" />
+                          Category:
+                        </span>
+                        <select
+                          value={stockUpdateCategoryFilter}
+                          onChange={(e) => setStockUpdateCategoryFilter(e.target.value)}
+                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                        >
+                          <option value="ALL">All Categories</option>
+                          {categories.map((cat) => (
+                            <option key={cat.id} value={cat.id}>
+                              {cat.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
                     {shops.length > 0 && (
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5">
                         <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
                           <Store className="w-3.5 h-3.5 text-purple-600" />
                           Shop:
@@ -4063,7 +4110,7 @@ export default function App() {
                         <select
                           value={stockUpdateShopFilter}
                           onChange={(e) => setStockUpdateShopFilter(e.target.value)}
-                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                         >
                           <option value="ALL">All Shops</option>
                           {shops.map((s) => (
@@ -4094,6 +4141,11 @@ export default function App() {
                           !searchQ || shop.name.toLowerCase().includes(searchQ);
 
                         const visibleCategoryBlocks = categories
+                          .filter(
+                            (cat) =>
+                              stockUpdateCategoryFilter === 'ALL' ||
+                              String(cat.id) === String(stockUpdateCategoryFilter)
+                          )
                           .map((cat) => {
                             const catItems = items.filter(
                               (it) => String(it.category_id) === String(cat.id)
@@ -4303,7 +4355,9 @@ export default function App() {
                             <div className="p-4 space-y-4">
                               {visibleCategoryBlocks.length === 0 ? (
                                 <div className="text-center py-6 text-xs text-slate-400">
-                                  No items matching "{stockUpdateSearchQuery}" in {shop.name}.
+                                  {stockUpdateSearchQuery
+                                    ? `No items matching "${stockUpdateSearchQuery}" in ${shop.name}.`
+                                    : `No items found for the selected category in ${shop.name}.`}
                                 </div>
                               ) : (
                                 visibleCategoryBlocks
@@ -5417,20 +5471,68 @@ function SingleRowFlavourItemEditor({
   const [typeName, setTypeName] = useState(item.name);
   const [price, setPrice] = useState(item.price);
   const [categoryId, setCategoryId] = useState(item.category_id || '');
+  const [imageUrl, setImageUrl] = useState(item.image_url || '');
 
   const isDirty =
     typeName.trim() !== item.name ||
     Number(price) !== Number(item.price) ||
-    (!isBilled && categoryId !== (item.category_id || ''));
+    (!isBilled && categoryId !== (item.category_id || '')) ||
+    imageUrl !== (item.image_url || '');
 
   useEffect(() => {
     setTypeName(item.name);
     setPrice(item.price);
     setCategoryId(item.category_id || '');
-  }, [item.name, item.price, item.category_id]);
+    setImageUrl(item.image_url || '');
+  }, [item.name, item.price, item.category_id, item.image_url]);
+
+  const handleImageFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await compressImageToDataUrl(file);
+      setImageUrl(dataUrl);
+    } catch {
+      // Ignore unreadable image
+    } finally {
+      e.target.value = '';
+    }
+  };
 
   return (
     <div className="inline-flex flex-wrap items-center gap-1.5 bg-[#FAF8F5] border border-purple-200/80 rounded-lg px-2.5 py-1.5 shrink-0">
+      <div className="flex items-center gap-1">
+        <label
+          title={imageUrl ? 'Change item image' : 'Upload item image'}
+          className="relative inline-flex items-center justify-center w-7 h-7 rounded-full border border-purple-200 bg-white hover:border-purple-500 text-purple-600 cursor-pointer overflow-hidden shrink-0 transition-colors"
+        >
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt={typeName}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <ImagePlus className="w-3.5 h-3.5" />
+          )}
+          <input
+            type="file"
+            accept="image/*"
+            onChange={handleImageFileChange}
+            className="hidden"
+          />
+        </label>
+        {imageUrl && (
+          <button
+            type="button"
+            onClick={() => setImageUrl('')}
+            title="Remove item image"
+            className="p-0.5 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer transition-colors"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        )}
+      </div>
       <input
         type="text"
         value={typeName}
@@ -5486,7 +5588,7 @@ function SingleRowFlavourItemEditor({
             price,
             isBilled ? item.category_id : categoryId,
             categoryId === item.category_id ? item.subcategory_id : null,
-            item.image_url,
+            imageUrl,
             typeName
           )
         }
