@@ -155,7 +155,7 @@ export default function App() {
   const [stockAlertShopFilter, setStockAlertShopFilter] = useState('ALL');
   const [stockAlertCategoryFilter, setStockAlertCategoryFilter] = useState('ALL');
   const [stockAlertSearchQuery, setStockAlertSearchQuery] = useState('');
-  const [lowStockThreshold, setLowStockThreshold] = useState(5);
+  const [lowStockThreshold, setLowStockThreshold] = useState(2);
 
   // Stock Update Shop Filter & Category-Level Draft Stock Maps
   const [stockUpdateShopFilter, setStockUpdateShopFilter] = useState('ALL');
@@ -223,6 +223,11 @@ export default function App() {
     const dd = String(now.getDate()).padStart(2, '0');
     return `${yyyy}-${mm}-${dd}`;
   });
+  const [stockGlanceShopFilter, setStockGlanceShopFilter] = useState('ALL');
+  const [stockGlanceCategoryFilter, setStockGlanceCategoryFilter] = useState('ALL');
+  const [stockGlanceFlavourFilter, setStockGlanceFlavourFilter] = useState('ALL');
+  const [stockGlanceItemTypeFilter, setStockGlanceItemTypeFilter] = useState('ALL');
+  const [stockGlanceSearchQuery, setStockGlanceSearchQuery] = useState('');
   const [billDateFilter, setBillDateFilter] = useState(() => {
     const now = new Date();
     const yyyy = now.getFullYear();
@@ -420,9 +425,24 @@ export default function App() {
   }, [shops, currentLoggedInUser, activeShopId, assignShopId, newUserShopId, expenseConfigShopId]);
 
   // Keep Stock Assignment cascading dropdowns (Category -> Flavour -> Item Type) synchronized
+  const getDistinctByName = (list = []) => {
+    const seen = new Set();
+    return list.filter((entry) => {
+      const key = (entry?.name || '').trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
+  const distinctShops = useMemo(() => getDistinctByName(shops), [shops]);
+  const distinctCategories = useMemo(() => getDistinctByName(categories), [categories]);
+
   const assignCategorySubcategories = useMemo(() => {
     if (!assignCategoryId) return [];
-    return subcategories.filter((sc) => sc.category_id === assignCategoryId);
+    return getDistinctByName(
+      subcategories.filter((sc) => sc.category_id === assignCategoryId)
+    );
   }, [subcategories, assignCategoryId]);
 
   const assignFilteredItems = useMemo(() => {
@@ -1832,6 +1852,197 @@ export default function App() {
     currentLoggedInUser
   ]);
 
+  // Analytics: Current Stock at a Glance (All Shops / Shop / Category / Flavour / Item Type)
+  const stockAtAGlanceData = useMemo(() => {
+    const scopedShops = isShopAdmin
+      ? shops.filter((s) => s.id === currentLoggedInUser?.shop_id)
+      : stockGlanceShopFilter === 'ALL'
+      ? shops
+      : shops.filter((s) => s.id === stockGlanceShopFilter);
+
+    const flavourOptionsSet = new Map();
+    subcategories.forEach((sc) => {
+      if (
+        stockGlanceCategoryFilter !== 'ALL' &&
+        String(sc.category_id) !== String(stockGlanceCategoryFilter)
+      ) {
+        return;
+      }
+      const cleanName = (sc.name || '').trim();
+      const key = cleanName.toLowerCase();
+      if (key && !flavourOptionsSet.has(key)) {
+        flavourOptionsSet.set(key, cleanName);
+      }
+    });
+    const availableFlavours = Array.from(flavourOptionsSet.values()).sort((a, b) =>
+      a.localeCompare(b)
+    );
+
+    const itemTypeOptionsSet = new Map();
+    items.forEach((it) => {
+      if (
+        stockGlanceCategoryFilter !== 'ALL' &&
+        String(it.category_id) !== String(stockGlanceCategoryFilter)
+      ) {
+        return;
+      }
+      if (stockGlanceFlavourFilter === 'GENERAL') {
+        if (it.subcategory_id) return;
+      } else if (stockGlanceFlavourFilter !== 'ALL') {
+        const subName =
+          subcategories
+            .find((sc) => String(sc.id) === String(it.subcategory_id))
+            ?.name?.trim()
+            .toLowerCase() || '';
+        if (subName !== stockGlanceFlavourFilter.toLowerCase()) return;
+      }
+      const cleanName = (it.name || '').trim();
+      const key = cleanName.toLowerCase();
+      if (key && !itemTypeOptionsSet.has(key)) {
+        itemTypeOptionsSet.set(key, cleanName);
+      }
+    });
+    const availableItemTypes = Array.from(itemTypeOptionsSet.values()).sort((a, b) =>
+      a.localeCompare(b)
+    );
+
+    const query = stockGlanceSearchQuery.trim().toLowerCase();
+    const matchedItems = items.filter((it) => {
+      if (
+        stockGlanceCategoryFilter !== 'ALL' &&
+        String(it.category_id) !== String(stockGlanceCategoryFilter)
+      ) {
+        return false;
+      }
+      if (stockGlanceFlavourFilter === 'GENERAL') {
+        if (it.subcategory_id) return false;
+      } else if (stockGlanceFlavourFilter !== 'ALL') {
+        const subName =
+          subcategories
+            .find((sc) => String(sc.id) === String(it.subcategory_id))
+            ?.name?.trim()
+            .toLowerCase() || '';
+        if (subName !== stockGlanceFlavourFilter.toLowerCase()) return false;
+      }
+      if (
+        stockGlanceItemTypeFilter !== 'ALL' &&
+        (it.name || '').trim().toLowerCase() !== stockGlanceItemTypeFilter.toLowerCase()
+      ) {
+        return false;
+      }
+      if (!query) return true;
+      const catName =
+        categories.find((c) => String(c.id) === String(it.category_id))?.name.toLowerCase() || '';
+      const subName =
+        subcategories
+          .find((sc) => String(sc.id) === String(it.subcategory_id))
+          ?.name.toLowerCase() || '';
+      return (
+        (it.name || '').toLowerCase().includes(query) ||
+        catName.includes(query) ||
+        subName.includes(query)
+      );
+    });
+
+    let totalUnits = 0;
+    let inStockItemsCount = 0;
+    let outOfStockItemsCount = 0;
+
+    const perShopTotalsMap = new Map();
+    scopedShops.forEach((s) => {
+      perShopTotalsMap.set(s.id, { shopId: s.id, shopName: s.name, units: 0 });
+    });
+
+    const catGroupMap = new Map();
+    matchedItems.forEach((it) => {
+      const cat = categories.find((c) => String(c.id) === String(it.category_id));
+      const subcat = subcategories.find((sc) => String(sc.id) === String(it.subcategory_id));
+      const categoryName = cat ? cat.name : 'Uncategorized';
+      const flavourName = subcat ? subcat.name : it.name;
+
+      let itemTotalStock = 0;
+      const shopBreakdown = [];
+
+      if (scopedShops.length > 0) {
+        scopedShops.forEach((shop) => {
+          const alloc = shopStocks.find(
+            (ss) => ss.shop_id === shop.id && ss.item_id === it.id
+          );
+          const qty = alloc ? Number(alloc.stock) : 0;
+          itemTotalStock += qty;
+          shopBreakdown.push({ shopId: shop.id, shopName: shop.name, stock: qty });
+          const shopEntry = perShopTotalsMap.get(shop.id);
+          if (shopEntry) shopEntry.units += qty;
+        });
+      } else {
+        itemTotalStock = Number(it.stock) || 0;
+      }
+
+      totalUnits += itemTotalStock;
+      if (itemTotalStock > 0) inStockItemsCount += 1;
+      else outOfStockItemsCount += 1;
+
+      if (!catGroupMap.has(categoryName)) {
+        catGroupMap.set(categoryName, {
+          categoryName,
+          totalStock: 0,
+          itemCount: 0,
+          flavourMap: new Map()
+        });
+      }
+      const catGroup = catGroupMap.get(categoryName);
+      catGroup.totalStock += itemTotalStock;
+      catGroup.itemCount += 1;
+
+      const flavourKey = subcat ? `sub::${subcat.id}` : `direct::${it.id}`;
+      if (!catGroup.flavourMap.has(flavourKey)) {
+        catGroup.flavourMap.set(flavourKey, {
+          key: flavourKey,
+          flavourName,
+          items: []
+        });
+      }
+      catGroup.flavourMap.get(flavourKey).items.push({
+        item: it,
+        totalStock: itemTotalStock,
+        shopBreakdown
+      });
+    });
+
+    const groupedByCategory = Array.from(catGroupMap.values())
+      .sort((a, b) => a.categoryName.localeCompare(b.categoryName))
+      .map(({ flavourMap, ...rest }) => ({
+        ...rest,
+        flavourGroups: Array.from(flavourMap.values()).sort((a, b) =>
+          a.flavourName.localeCompare(b.flavourName)
+        )
+      }));
+
+    return {
+      scopedShops,
+      availableFlavours,
+      availableItemTypes,
+      groupedByCategory,
+      perShopTotals: Array.from(perShopTotalsMap.values()),
+      totalUnits,
+      inStockItemsCount,
+      outOfStockItemsCount
+    };
+  }, [
+    shops,
+    shopStocks,
+    items,
+    categories,
+    subcategories,
+    isShopAdmin,
+    currentLoggedInUser,
+    stockGlanceShopFilter,
+    stockGlanceCategoryFilter,
+    stockGlanceFlavourFilter,
+    stockGlanceItemTypeFilter,
+    stockGlanceSearchQuery
+  ]);
+
   // Distinct in-stock Categories for Sales POS filter bar
   const distinctInStockPosCategories = useMemo(() => {
     const seen = new Set();
@@ -2288,7 +2499,7 @@ export default function App() {
                   }}
                   className="bg-transparent text-xs font-semibold text-purple-950 focus:outline-none"
                 >
-                  {shops.map((s) => (
+                  {distinctShops.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.sales_profile_name})
                     </option>
@@ -2399,7 +2610,7 @@ export default function App() {
                     }}
                     className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                   >
-                    {shops.map((s) => (
+                    {distinctShops.map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.name} — Profile: {s.sales_profile_name}
                       </option>
@@ -3144,7 +3355,7 @@ export default function App() {
                   className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                 >
                   <option value="ALL">All Shops (Total Combined)</option>
-                  {shops.map((s) => (
+                  {distinctShops.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.sales_profile_name})
                     </option>
@@ -3452,6 +3663,298 @@ export default function App() {
                   </table>
                 </div>
               </div>
+
+              {/* Current Stock at a Glance Section (All Shops / Shop / Category / Flavour / Item Type) */}
+              <div className="bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
+                <div className="p-5 border-b border-purple-100 space-y-3.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h3 className="font-bold text-purple-950 text-base flex items-center gap-2">
+                        <Package className="w-5 h-5 text-purple-600" />
+                        Current Stock at a Glance
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Live read-only stock overview across{' '}
+                        {isShopAdmin
+                          ? currentActiveShop?.name || 'your shop'
+                          : stockGlanceShopFilter === 'ALL'
+                          ? 'all shops'
+                          : shops.find((s) => s.id === stockGlanceShopFilter)?.name || 'selected shop'}
+                        .
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+                      <span className="px-2.5 py-1 rounded-lg bg-purple-100 text-purple-900">
+                        Total Units: {stockAtAGlanceData.totalUnits}
+                      </span>
+                      <span className="px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">
+                        In Stock: {stockAtAGlanceData.inStockItemsCount}
+                      </span>
+                      <span className="px-2.5 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200">
+                        Out of Stock: {stockAtAGlanceData.outOfStockItemsCount}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Filters: Shop, Category, Flavour, Item Type, Search */}
+                  <div className="flex flex-wrap items-center gap-2.5 pt-3 border-t border-purple-50">
+                    {isSuperAdmin && shops.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                          <Store className="w-3.5 h-3.5 text-purple-600" />
+                          Shop:
+                        </span>
+                        <select
+                          value={stockGlanceShopFilter}
+                          onChange={(e) => setStockGlanceShopFilter(e.target.value)}
+                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                        >
+                          <option value="ALL">All Shops</option>
+                          {distinctShops.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {distinctCategories.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                          <Layers className="w-3.5 h-3.5 text-purple-600" />
+                          Category:
+                        </span>
+                        <select
+                          value={stockGlanceCategoryFilter}
+                          onChange={(e) => {
+                            setStockGlanceCategoryFilter(e.target.value);
+                            setStockGlanceFlavourFilter('ALL');
+                            setStockGlanceItemTypeFilter('ALL');
+                          }}
+                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                        >
+                          <option value="ALL">All Categories</option>
+                          {distinctCategories.map((cat) => (
+                            <option key={cat.id} value={cat.id}>
+                              {cat.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    {stockAtAGlanceData.availableFlavours.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
+                          <FolderTree className="w-3.5 h-3.5 text-purple-600" />
+                          Flavour:
+                        </span>
+                        <select
+                          value={stockGlanceFlavourFilter}
+                          onChange={(e) => {
+                            setStockGlanceFlavourFilter(e.target.value);
+                            setStockGlanceItemTypeFilter('ALL');
+                          }}
+                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                        >
+                          <option value="ALL">All Flavours</option>
+                          {stockAtAGlanceData.availableFlavours.map((flavourName) => (
+                            <option key={flavourName} value={flavourName}>
+                              {flavourName}
+                            </option>
+                          ))}
+                          <option value="GENERAL">General / None</option>
+                        </select>
+                      </div>
+                    )}
+
+                    {stockAtAGlanceData.availableItemTypes.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-slate-500">
+                          Item Type:
+                        </span>
+                        <select
+                          value={stockGlanceItemTypeFilter}
+                          onChange={(e) => setStockGlanceItemTypeFilter(e.target.value)}
+                          className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                        >
+                          <option value="ALL">All Item Types</option>
+                          {stockAtAGlanceData.availableItemTypes.map((typeName) => (
+                            <option key={typeName} value={typeName}>
+                              {typeName}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <div className="relative flex-1 min-w-[160px]">
+                      <Search className="w-3.5 h-3.5 text-purple-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        placeholder="Search stock..."
+                        value={stockGlanceSearchQuery}
+                        onChange={(e) => setStockGlanceSearchQuery(e.target.value)}
+                        className="w-full bg-[#FAF8F5] border border-purple-200 rounded-xl pl-8 pr-7 py-1.5 text-xs text-slate-900 focus:outline-none focus:border-purple-600 focus:bg-white"
+                      />
+                      {stockGlanceSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setStockGlanceSearchQuery('')}
+                          aria-label="Clear stock glance search"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {(stockGlanceShopFilter !== 'ALL' ||
+                      stockGlanceCategoryFilter !== 'ALL' ||
+                      stockGlanceFlavourFilter !== 'ALL' ||
+                      stockGlanceItemTypeFilter !== 'ALL' ||
+                      stockGlanceSearchQuery) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStockGlanceShopFilter('ALL');
+                          setStockGlanceCategoryFilter('ALL');
+                          setStockGlanceFlavourFilter('ALL');
+                          setStockGlanceItemTypeFilter('ALL');
+                          setStockGlanceSearchQuery('');
+                        }}
+                        className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold cursor-pointer"
+                      >
+                        Reset
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Per-Shop Quick Stock Summary Strip when viewing All Shops */}
+                  {isSuperAdmin &&
+                    stockGlanceShopFilter === 'ALL' &&
+                    stockAtAGlanceData.perShopTotals.length > 1 && (
+                      <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-purple-50 text-xs">
+                        <span className="font-semibold text-slate-500">By Shop:</span>
+                        {stockAtAGlanceData.perShopTotals.map((st) => (
+                          <button
+                            key={st.shopId}
+                            type="button"
+                            onClick={() => setStockGlanceShopFilter(st.shopId)}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#FAF8F5] hover:bg-purple-50 border border-purple-200/80 text-purple-950 font-semibold transition-colors cursor-pointer"
+                          >
+                            <Store className="w-3 h-3 text-purple-600" />
+                            <span>{st.shopName}:</span>
+                            <span className="font-extrabold text-purple-700">
+                              {st.units}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                </div>
+
+                {/* Read-Only Stock Breakdown Grouped by Category -> Flavour -> Item Types */}
+                <div className="p-4 space-y-4">
+                  {stockAtAGlanceData.groupedByCategory.length === 0 ? (
+                    <div className="text-center py-8 bg-[#FAF8F5] rounded-xl border border-dashed border-purple-200 text-xs text-slate-400">
+                      No stock items match the selected filters.
+                    </div>
+                  ) : (
+                    stockAtAGlanceData.groupedByCategory.map((group) => (
+                      <div
+                        key={`glance-${group.categoryName}`}
+                        className="border border-purple-100 rounded-xl overflow-hidden"
+                      >
+                        <div className="px-4 py-2.5 bg-purple-50/70 border-b border-purple-100 flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-bold text-purple-950 text-xs sm:text-sm">
+                            {group.categoryName}
+                          </span>
+                          <span className="text-xs font-bold text-purple-800 bg-white border border-purple-200 px-2.5 py-0.5 rounded-full">
+                            Stock: {group.totalStock}
+                          </span>
+                        </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="bg-[#FAF8F5] border-b border-purple-100 text-[11px] uppercase tracking-wider text-slate-500">
+                                <th className="py-2 px-4 w-48">Flavour / Item</th>
+                                <th className="py-2 px-4">Item Types & Available Stock</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-purple-50 text-sm">
+                              {group.flavourGroups.map((fg) => (
+                                <tr
+                                  key={`glance-${group.categoryName}-${fg.key}`}
+                                  className="hover:bg-[#FAF8F5]/70 align-middle"
+                                >
+                                  <td className="py-2.5 px-4 font-bold text-purple-950 text-xs sm:text-sm">
+                                    {fg.flavourName}
+                                  </td>
+                                  <td className="py-2.5 px-4">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      {fg.items.map(({ item, totalStock, shopBreakdown }) => {
+                                        const isOut = totalStock <= 0;
+                                        const isLow =
+                                          !isOut && totalStock <= (Number(lowStockThreshold) || 5);
+                                        return (
+                                          <div
+                                            key={`glance-item-${item.id}`}
+                                            className={`inline-flex flex-col gap-0.5 rounded-xl px-3 py-1.5 border ${
+                                              isOut
+                                                ? 'bg-rose-50/70 border-rose-200'
+                                                : isLow
+                                                ? 'bg-amber-50/70 border-amber-200'
+                                                : 'bg-[#FAF8F5] border-purple-100'
+                                            }`}
+                                          >
+                                            <div className="flex items-center gap-2">
+                                              <span className="text-xs sm:text-sm font-bold text-slate-800">
+                                                {item.name}
+                                              </span>
+                                              <span
+                                                className={`px-2 py-0.5 rounded-full text-xs font-extrabold ${
+                                                  isOut
+                                                    ? 'bg-rose-100 text-rose-800'
+                                                    : isLow
+                                                    ? 'bg-amber-100 text-amber-800'
+                                                    : 'bg-purple-100 text-purple-900'
+                                                }`}
+                                              >
+                                                {totalStock}
+                                              </span>
+                                            </div>
+                                            {isSuperAdmin &&
+                                              stockGlanceShopFilter === 'ALL' &&
+                                              shopBreakdown.length > 1 && (
+                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-slate-500">
+                                                  {shopBreakdown.map((sb) => (
+                                                    <span key={sb.shopId}>
+                                                      {sb.shopName}:{' '}
+                                                      <strong className="text-slate-700">
+                                                        {sb.stock}
+                                                      </strong>
+                                                    </span>
+                                                  ))}
+                                                </div>
+                                              )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -3537,7 +4040,7 @@ export default function App() {
                       className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                     >
                       <option value="ALL">All Shops</option>
-                      {shops.map((s) => (
+                      {distinctShops.map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.name}
                         </option>
@@ -3744,14 +4247,14 @@ export default function App() {
                   </div>
 
                   {/* Category Filter */}
-                  {categories.length > 0 && (
+                  {distinctCategories.length > 0 && (
                     <select
                       value={stockAlertCategoryFilter}
                       onChange={(e) => setStockAlertCategoryFilter(e.target.value)}
                       className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                     >
                       <option value="ALL">All Categories</option>
-                      {categories.map((cat) => (
+                      {distinctCategories.map((cat) => (
                         <option key={cat.id} value={cat.id}>
                           {cat.name}
                         </option>
@@ -3767,7 +4270,7 @@ export default function App() {
                       className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                     >
                       <option value="ALL">All Shops</option>
-                      {shops.map((s) => (
+                      {distinctShops.map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.name}
                         </option>
@@ -3956,7 +4459,7 @@ export default function App() {
                       placeholder="Select shop..."
                       searchPlaceholder="Search shop..."
                       emptyMessage="Create a shop first"
-                      options={shops.map((s) => ({
+                      options={distinctShops.map((s) => ({
                         value: s.id,
                         label: `${s.name} (${s.sales_profile_name})`
                       }))}
@@ -3976,7 +4479,7 @@ export default function App() {
                       placeholder="Select category..."
                       searchPlaceholder="Search category..."
                       emptyMessage="Create a category first"
-                      options={categories.map((cat) => ({
+                      options={distinctCategories.map((cat) => ({
                         value: cat.id,
                         label: cat.name
                       }))}
@@ -4081,7 +4584,7 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    {categories.length > 0 && (
+                    {distinctCategories.length > 0 && (
                       <div className="flex items-center gap-1.5">
                         <span className="text-xs font-semibold text-slate-500 flex items-center gap-1">
                           <Layers className="w-3.5 h-3.5 text-purple-600" />
@@ -4093,7 +4596,7 @@ export default function App() {
                           className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                         >
                           <option value="ALL">All Categories</option>
-                          {categories.map((cat) => (
+                          {distinctCategories.map((cat) => (
                             <option key={cat.id} value={cat.id}>
                               {cat.name}
                             </option>
@@ -4113,7 +4616,7 @@ export default function App() {
                           className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
                         >
                           <option value="ALL">All Shops</option>
-                          {shops.map((s) => (
+                          {distinctShops.map((s) => (
                             <option key={s.id} value={s.id}>
                               {s.name} ({s.sales_profile_name})
                             </option>
@@ -5648,11 +6151,21 @@ function SearchableSelect({
 
   const selectedOption = options.find((opt) => opt.value === value);
 
+  const distinctOptions = useMemo(() => {
+    const seen = new Set();
+    return options.filter((opt) => {
+      const key = (opt?.label || '').trim().toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [options]);
+
   const filteredOptions = useMemo(() => {
     const clean = query.trim().toLowerCase();
-    if (!clean) return options;
-    return options.filter((opt) => opt.label.toLowerCase().includes(clean));
-  }, [options, query]);
+    if (!clean) return distinctOptions;
+    return distinctOptions.filter((opt) => opt.label.toLowerCase().includes(clean));
+  }, [distinctOptions, query]);
 
   return (
     <div ref={containerRef} className="relative">
