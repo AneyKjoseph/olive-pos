@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS app_users (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   username TEXT UNIQUE NOT NULL,
   password TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'admin' CHECK (role IN ('admin', 'shop-admin', 'staff')),
+  role TEXT NOT NULL DEFAULT 'superadmin' CHECK (role IN ('admin', 'superadmin', 'shop-admin', 'staff')),
   shop_id UUID REFERENCES shops(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -162,7 +162,7 @@ CREATE POLICY "Allow all operations on app_users" ON app_users FOR ALL USING (tr
 
 -- 12. Seed Default Super Admin Account
 INSERT INTO app_users (username, password, role, shop_id)
-VALUES ('admin', 'admin123', 'admin', NULL)
+VALUES ('admin', 'admin123', 'superadmin', NULL)
 ON CONFLICT (username) DO NOTHING;
 
 
