@@ -467,6 +467,38 @@ export default function App() {
         setShopCategoryExpenses(shopCatExpData || []);
         setDbUsers(usersData || []);
 
+        if (currentLoggedInUser) {
+          const refreshedUser = (usersData || []).find(
+            (user) => String(user.id) === String(currentLoggedInUser.id)
+          );
+          const userChanged =
+            refreshedUser &&
+            Object.keys(refreshedUser).some(
+              (key) => refreshedUser[key] !== currentLoggedInUser[key]
+            );
+
+          if (userChanged) {
+            setCurrentLoggedInUser(refreshedUser);
+            if (refreshedUser.shop_id && refreshedUser.shop_id !== currentLoggedInUser.shop_id) {
+              setActiveShopId(refreshedUser.shop_id);
+            }
+            const activeSession = loadActiveSession();
+            if (activeSession) {
+              try {
+                localStorage.setItem(
+                  AUTH_SESSION_STORAGE_KEY,
+                  JSON.stringify({
+                    user: refreshedUser,
+                    expiresAt: activeSession.expiresAt
+                  })
+                );
+              } catch {
+                // Ignore storage quota errors
+              }
+            }
+          }
+        }
+
         if (!shopsData || shopsData.length === 0) {
           setActiveShopId('');
           setAssignShopId('');
