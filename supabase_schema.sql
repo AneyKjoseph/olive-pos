@@ -29,11 +29,15 @@ CREATE TABLE IF NOT EXISTS items (
   image_url TEXT DEFAULT '',
   price NUMERIC(10,2) NOT NULL CHECK (price >= 0),
   stock INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  is_displayed BOOLEAN NOT NULL DEFAULT TRUE,
+  available_shop_ids UUID[] DEFAULT NULL,
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE items ADD COLUMN IF NOT EXISTS subcategory_id UUID REFERENCES subcategories(id) ON DELETE SET NULL;
 ALTER TABLE items ADD COLUMN IF NOT EXISTS image_url TEXT DEFAULT '';
+ALTER TABLE items ADD COLUMN IF NOT EXISTS is_displayed BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE items ADD COLUMN IF NOT EXISTS available_shop_ids UUID[] DEFAULT NULL;
 
 -- 4. Shops Table (Each shop has exactly 1 dedicated Sales Profile)
 CREATE TABLE IF NOT EXISTS shops (
