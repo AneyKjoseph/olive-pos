@@ -49,3 +49,83 @@
     grid-column: 1 / -1;
   }
 }
+
+@media print {
+  @page {
+    margin: 12mm;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .print-report-root,
+  .print-report-root * {
+    visibility: visible !important;
+  }
+
+  .print-report-root {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .print-report-root .no-print {
+    display: none !important;
+  }
+
+  body[data-print-report="out-of-stock"] .print-report-root .print-report-section:not(#report-out-of-stock),
+  body[data-print-report="current-stock"] .print-report-root .print-report-section:not(#report-current-stock),
+  body[data-print-report="orders-due"] .print-report-root .print-report-section:not(#report-orders-due) {
+    display: none !important;
+  }
+
+  .print-report-paper {
+    border: 0 !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .print-report-section h3 {
+    break-after: avoid;
+  }
+
+  .print-report-root table {
+    display: table !important;
+    width: 100% !important;
+    border-collapse: collapse !important;
+  }
+
+  .print-report-root thead {
+    display: table-header-group !important;
+  }
+
+  .print-report-root tbody {
+    display: table-row-group !important;
+  }
+
+  .print-report-root tr {
+    display: table-row !important;
+    break-inside: avoid;
+  }
+
+  .print-report-root th,
+  .print-report-root td {
+    border: 1px solid #444 !important;
+    background: #fff !important;
+    color: #000 !important;
+    padding: 4px 6px !important;
+  }
+
+  .print-report-root h2,
+  .print-report-root h3,
+  .print-report-root h4,
+  .print-report-root p {
+    color: #000 !important;
+  }
+}

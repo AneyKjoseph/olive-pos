@@ -35,7 +35,8 @@ import {
   Phone,
   Sparkles,
   Edit3,
-  Eye
+  Eye,
+  Printer
 } from 'lucide-react';
 import MenuItemEditor from './components/MenuItemEditor.jsx';
 import SearchableSelect from './components/SearchableSelect.jsx';
@@ -342,6 +343,9 @@ export default function App() {
   const [billSearchQuery, setBillSearchQuery] = useState('');
   const [billPaymentFilter, setBillPaymentFilter] = useState('ALL');
   const [billShopFilter, setBillShopFilter] = useState('ALL');
+  const [editingBillDateId, setEditingBillDateId] = useState(null);
+  const [billDateDraft, setBillDateDraft] = useState('');
+  const [processingBillAction, setProcessingBillAction] = useState(null);
 
   // Public folder logo fallback flag (/logo.png)
   const [logoLoadFailed, setLogoLoadFailed] = useState(false);
@@ -365,6 +369,15 @@ export default function App() {
   const showToast = (message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
+  };
+
+  const handlePrintReportSection = (sectionKey) => {
+    document.body.dataset.printReport = sectionKey;
+    try {
+      window.print();
+    } finally {
+      delete document.body.dataset.printReport;
+    }
   };
 
   // Keep active session valid for 2 hours across reloads and auto-expire when elapsed
@@ -677,7 +690,8 @@ export default function App() {
     return alloc ? Number(alloc.stock) : 0;
   }, [shopStocks, transferFromShopId, transferItemId]);
 
-  const isSuperAdmin = currentLoggedInUser?.role === 'admin';
+  const isSuperAdmin = currentLoggedInUser?.role === 'superadmin';
+  const isAdmin = isSuperAdmin || currentLoggedInUser?.role === 'admin';
   const isShopAdmin = currentLoggedInUser?.role === 'shop-admin';
   const currentActiveShop = useMemo(
     () => shops.find((s) => s.id === activeShopId) || null,
@@ -769,6 +783,10 @@ export default function App() {
   const handleAddDbUser = async (e) => {
     e.preventDefault();
     if (isAddingUser) return;
+    if (newUserRole === 'superadmin' && !isSuperAdmin) {
+      showToast('Only a Super Admin can create a Super Admin account.', 'error');
+      return;
+    }
     const cleanUser = newUserUsername.trim();
     const cleanPass = newUserPassword.trim();
     if (!cleanUser || cleanPass.length < 4) {
@@ -847,6 +865,64 @@ export default function App() {
     }
   };
 
+  const handleUpdateDbUserRole = async (userId, updatedRole, selectedShopId) => {
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can change user roles.', 'error');
+      return;
+    }
+    if (String(userId) === String(currentLoggedInUser?.id)) {
+      showToast('You cannot change your own role.', 'error');
+      return;
+    }
+
+    const validRoles = ['staff', 'shop-admin', 'admin', 'superadmin'];
+    if (!validRoles.includes(updatedRole)) {
+      showToast('Select a valid user role.', 'error');
+      return;
+    }
+    const roleNeedsShop = updatedRole === 'staff' || updatedRole === 'shop-admin';
+    const assignedShopExists = shops.some(
+      (shop) => String(shop.id) === String(selectedShopId)
+    );
+    if (roleNeedsShop && !assignedShopExists) {
+      showToast('Select a shop for this user role.', 'error');
+      return;
+    }
+
+    try {
+      if (isLiveSupabase) {
+        const updatedUsers = await supabase.request(
+          `app_users?id=eq.${encodeURIComponent(userId)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({
+              role: updatedRole,
+              shop_id: roleNeedsShop ? selectedShopId : null
+            })
+          }
+        );
+        if (!updatedUsers?.[0]) throw new Error('User role was not updated.');
+        await syncFromSupabase(true);
+      } else {
+        setDbUsers((previousUsers) =>
+          previousUsers.map((user) =>
+            user.id === userId
+              ? {
+                  ...user,
+                  role: updatedRole,
+                  shop_id: roleNeedsShop ? selectedShopId : null
+                }
+              : user
+          )
+        );
+      }
+      showToast('User role updated. They must sign in again for it to take effect.');
+    } catch (err) {
+      console.error(err);
+      showToast(COMMON_ERROR_MESSAGE, 'error');
+    }
+  };
+
   const handleDeleteDbUser = async (user) => {
     try {
       if (isLiveSupabase) {
@@ -861,6 +937,84 @@ export default function App() {
     } catch (err) {
       console.error(err);
       showToast(COMMON_ERROR_MESSAGE, 'error');
+    }
+  };
+
+  const handleSaveBillDate = async (bill) => {
+    if (!isSuperAdmin || processingBillAction || !billDateDraft) return;
+
+    const originalDate = new Date(bill.created_at);
+    const [year, month, day] = billDateDraft.split('-').map(Number);
+    const updatedDate = new Date(originalDate);
+    updatedDate.setFullYear(year, month - 1, day);
+    if (
+      Number.isNaN(originalDate.getTime()) ||
+      Number.isNaN(updatedDate.getTime()) ||
+      getLocalDateStr(updatedDate) !== billDateDraft
+    ) {
+      showToast('Choose a valid bill date.', 'error');
+      return;
+    }
+
+    setProcessingBillAction({ id: bill.id, action: 'date' });
+    try {
+      let updatedAt = updatedDate.toISOString();
+      if (isLiveSupabase) {
+        const updatedBills = await supabase.request(
+          `bills?id=eq.${encodeURIComponent(bill.id)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ created_at: updatedAt })
+          }
+        );
+        if (!updatedBills?.[0]) throw new Error('Bill was not updated.');
+        updatedAt = updatedBills[0].created_at;
+      }
+
+      setBills((previousBills) =>
+        previousBills.map((currentBill) =>
+          currentBill.id === bill.id ? { ...currentBill, created_at: updatedAt } : currentBill
+        )
+      );
+      setEditingBillDateId(null);
+      setBillDateDraft('');
+      showToast(`Bill ${bill.bill_number} date updated.`);
+    } catch (err) {
+      console.error(err);
+      showToast('Could not update the bill date. Please try again.', 'error');
+    } finally {
+      setProcessingBillAction(null);
+    }
+  };
+
+  const handleDeleteBill = async (bill) => {
+    if (!isSuperAdmin || processingBillAction) return;
+    const confirmed = window.confirm(
+      `Delete bill ${bill.bill_number} and its line items? Stock and linked order records will not change.`
+    );
+    if (!confirmed) return;
+
+    setProcessingBillAction({ id: bill.id, action: 'delete' });
+    try {
+      if (isLiveSupabase) {
+        const deletedBills = await supabase.request(
+          `bills?id=eq.${encodeURIComponent(bill.id)}`,
+          { method: 'DELETE' }
+        );
+        if (!deletedBills?.length) throw new Error('Bill was not deleted.');
+      }
+
+      setBills((previousBills) => previousBills.filter((currentBill) => currentBill.id !== bill.id));
+      if (editingBillDateId === bill.id) {
+        setEditingBillDateId(null);
+        setBillDateDraft('');
+      }
+      showToast(`Bill ${bill.bill_number} deleted.`);
+    } catch (err) {
+      console.error(err);
+      showToast('Could not delete the bill. Please try again.', 'error');
+    } finally {
+      setProcessingBillAction(null);
     }
   };
 
@@ -2191,7 +2345,7 @@ export default function App() {
       if (isShopAdmin) {
         return !o.shop_id || String(o.shop_id) === String(currentLoggedInUser?.shop_id);
       }
-      if (isSuperAdmin && adminOrdersShopFilter !== 'ALL') {
+      if (isAdmin && adminOrdersShopFilter !== 'ALL') {
         return String(o.shop_id) === String(adminOrdersShopFilter);
       }
       return true;
@@ -2227,7 +2381,7 @@ export default function App() {
       targetDateOrders,
       flavorBreakdown
     };
-  }, [orders, adminOrdersDate, adminOrdersShopFilter, isSuperAdmin, isShopAdmin, currentLoggedInUser]);
+  }, [orders, adminOrdersDate, adminOrdersShopFilter, isAdmin, isShopAdmin, currentLoggedInUser]);
 
   // ============================================================================
   // SHARED CATALOG OPERATIONS (CATEGORY -> FLAVOUR -> TYPE / PRODUCT)
@@ -2838,7 +2992,7 @@ export default function App() {
     ? currentLoggedInUser?.shop_id
     : adminSelectedShopFilter;
 
-  const isAllShopsAnalyticsSelected = isSuperAdmin && effectiveAnalyticsShopId === 'ALL';
+  const isAllShopsAnalyticsSelected = isAdmin && effectiveAnalyticsShopId === 'ALL';
 
   const analyticsData = useMemo(() => {
     const baseDate = analyticsDate
@@ -3084,7 +3238,7 @@ export default function App() {
     });
 
     const scopedShops =
-      isSuperAdmin && stockUpdateShopFilter !== 'ALL'
+      isAdmin && stockUpdateShopFilter !== 'ALL'
         ? allAccessibleShops.filter((s) => s.id === stockUpdateShopFilter)
         : allAccessibleShops;
 
@@ -3312,7 +3466,7 @@ export default function App() {
     items,
     categories,
     subcategories,
-    isSuperAdmin,
+    isAdmin,
     isShopAdmin,
     currentLoggedInUser,
     lowStockThreshold,
@@ -3323,6 +3477,73 @@ export default function App() {
     stockGlanceItemTypeFilter,
     stockUpdateSearchQuery
   ]);
+
+  const printStockReport = useMemo(() => {
+    const displayedItems = items.filter(isItemDisplayed);
+    const categoryNames = new Map(categories.map((category) => [String(category.id), category.name]));
+    const subcategoryNames = new Map(
+      subcategories.map((subcategory) => [String(subcategory.id), subcategory.name])
+    );
+    const stockByShop = new Map();
+    shopStocks.forEach((allocation) => {
+      const shopKey = String(allocation.shop_id);
+      if (!stockByShop.has(shopKey)) stockByShop.set(shopKey, new Map());
+      stockByShop.get(shopKey).set(String(allocation.item_id), Number(allocation.stock) || 0);
+    });
+
+    const shopSections = shops.map((shop) => {
+      const shopStock = stockByShop.get(String(shop.id));
+      const shopItems = displayedItems
+        .filter((item) => isItemAvailableAtShop(item, shop.id))
+        .map((item) => ({
+          key: `${shop.id}:${item.id}`,
+          categoryId: item.category_id,
+          itemName: item.name || '',
+          categoryName: categoryNames.get(String(item.category_id)) || 'Uncategorized',
+          flavourName: subcategoryNames.get(String(item.subcategory_id)) || '',
+          stock: shopStock?.get(String(item.id)) || 0
+        }))
+        .sort(
+          (a, b) =>
+            a.categoryName.localeCompare(b.categoryName) ||
+            a.flavourName.localeCompare(b.flavourName) ||
+            a.itemName.localeCompare(b.itemName)
+        );
+      const flavourGroupsByKey = new Map();
+      shopItems.forEach((item) => {
+        const key = JSON.stringify([
+          String(item.categoryId),
+          item.flavourName.trim().toLowerCase()
+        ]);
+        if (!flavourGroupsByKey.has(key)) {
+          flavourGroupsByKey.set(key, {
+            key,
+            categoryName: item.categoryName,
+            flavourName: item.flavourName,
+            items: []
+          });
+        }
+        flavourGroupsByKey.get(key).items.push(item);
+      });
+
+      return {
+        shop,
+        items: shopItems,
+        flavourGroups: Array.from(flavourGroupsByKey.values()),
+        outOfStockItems: shopItems.filter((item) => item.stock <= 0)
+      };
+    });
+
+    return { shopSections };
+  }, [shops, shopStocks, items, categories, subcategories]);
+
+  const ordersForPrintDate = useMemo(
+    () =>
+      orders
+        .filter((order) => order.order_date === adminOrdersDate)
+        .sort((a, b) => (a.order_time || '99:99').localeCompare(b.order_time || '99:99')),
+    [orders, adminOrdersDate]
+  );
 
   // Distinct in-stock Categories for Sales POS filter bar
   const distinctInStockPosCategories = useMemo(() => {
@@ -3428,7 +3649,7 @@ export default function App() {
       if (isShopAdmin && bill.shop_id !== currentLoggedInUser?.shop_id) {
         return false;
       }
-      if (isSuperAdmin && billShopFilter !== 'ALL' && bill.shop_id !== billShopFilter) {
+      if (isAdmin && billShopFilter !== 'ALL' && bill.shop_id !== billShopFilter) {
         return false;
       }
 
@@ -3469,7 +3690,7 @@ export default function App() {
     billSearchQuery,
     billPaymentFilter,
     billShopFilter,
-    isSuperAdmin,
+    isAdmin,
     isShopAdmin,
     currentLoggedInUser
   ]);
@@ -3629,7 +3850,7 @@ export default function App() {
 
           {/* Role Switcher */}
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
-            {isSuperAdmin && shops.length > 0 && (activeRole === 'sales' || activeRole === 'orders') && (
+            {isAdmin && shops.length > 0 && (activeRole === 'sales' || activeRole === 'orders') && (
               <div className="hidden md:flex items-center gap-1.5 bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5">
                 <Store className="w-3.5 h-3.5 text-purple-600" />
                 <select
@@ -3649,7 +3870,7 @@ export default function App() {
               </div>
             )}
 
-            {(isSuperAdmin || isShopAdmin) && (
+            {(isAdmin || isShopAdmin) && (
               <div className="bg-[#FAF8F5] p-1 rounded-xl border border-purple-100 flex items-center">
                 <button
                   onClick={() => setActiveRole('sales')}
@@ -3752,7 +3973,7 @@ export default function App() {
               </div>
 
               <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">
-                {isSuperAdmin && shops.length > 0 && (
+                {isAdmin && shops.length > 0 && (
                   <select
                     value={activeShopId}
                     onChange={(e) => {
@@ -4449,7 +4670,7 @@ export default function App() {
             </div>
 
             <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">
-              {isSuperAdmin && shops.length > 0 && (
+              {isAdmin && shops.length > 0 && (
                 <select
                   value={activeShopId}
                   onChange={(e) => {
@@ -5211,7 +5432,7 @@ export default function App() {
                 )}
               </button>
 
-              {isSuperAdmin && (
+              {isAdmin && (
                 <>
                   <button
                     onClick={() => setAdminTab('inventory')}
@@ -5223,6 +5444,17 @@ export default function App() {
                   >
                     <Layers className="w-4 h-4" />
                     Menu Editor
+                  </button>
+                  <button
+                    onClick={() => setAdminTab('reports')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+                      adminTab === 'reports'
+                        ? 'bg-purple-700 text-white shadow-sm'
+                        : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
+                    }`}
+                  >
+                    <Printer className="w-4 h-4" />
+                    Print Reports
                   </button>
                   <button
                     onClick={() => setAdminTab('users')}
@@ -5239,7 +5471,7 @@ export default function App() {
               )}
             </div>
 
-            {isSuperAdmin && adminTab === 'analytics' && shops.length > 0 && (
+            {isAdmin && adminTab === 'analytics' && shops.length > 0 && (
               <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">
                 <span className="text-xs font-semibold text-slate-500">Filter Shop:</span>
                 <select
@@ -5381,7 +5613,7 @@ export default function App() {
               </div>
 
               {/* Super Admin: Shop-Wise Sales & Total Combined Sales Summary Table */}
-              {isSuperAdmin && shops.length > 0 && (
+              {isAdmin && shops.length > 0 && (
                 <div className="bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
                   <div className="p-5 border-b border-purple-100 flex flex-wrap items-center justify-between gap-2">
                     <div>
@@ -5514,7 +5746,7 @@ export default function App() {
                             {!isAllShopsAnalyticsSelected && (
                               <>
                                 <td data-label="Expense %" className="py-4 px-4">
-                                  {row.categoryId && (isSuperAdmin || isShopAdmin) ? (
+                                  {row.categoryId && (isAdmin || isShopAdmin) ? (
                                     <div className="flex items-center justify-center gap-1">
                                       <input
                                         type="number"
@@ -5576,7 +5808,7 @@ export default function App() {
 
                 <div className="flex flex-wrap items-center gap-3">
                   {/* Shop Filter (Super Admin) */}
-                  {isSuperAdmin && shops.length > 0 && (
+                  {isAdmin && shops.length > 0 && (
                     <div className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-2">
                       <span className="block text-[10px] font-bold uppercase tracking-wider text-purple-700 mb-0.5">
                         Shop
@@ -5931,7 +6163,7 @@ export default function App() {
                     ))}
                   </div>
 
-                  {isSuperAdmin && shops.length > 0 && (
+                  {isAdmin && shops.length > 0 && (
                     <select
                       value={billShopFilter}
                       onChange={(e) => setBillShopFilter(e.target.value)}
@@ -6000,9 +6232,63 @@ export default function App() {
                                 ? `Split (Cash: ₹${Number(bill.cash_amount || 0).toFixed(2)}, UPI: ₹${Number(bill.upi_amount || 0).toFixed(2)})`
                                 : bill.payment_method || 'Cash'}
                             </span>
-                            <span className="text-xs text-slate-500">
-                              {new Date(bill.created_at).toLocaleString()}
-                            </span>
+                            {editingBillDateId === bill.id && isSuperAdmin ? (
+                              <span className="inline-flex flex-wrap items-center gap-1">
+                                <input
+                                  type="date"
+                                  aria-label={`New date for bill ${bill.bill_number}`}
+                                  value={billDateDraft}
+                                  onChange={(e) => setBillDateDraft(e.target.value)}
+                                  disabled={Boolean(processingBillAction)}
+                                  className="bg-white border border-purple-200 rounded-lg px-2 py-1 text-xs text-purple-950 focus:outline-none focus:border-purple-600"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveBillDate(bill)}
+                                  disabled={!billDateDraft || Boolean(processingBillAction)}
+                                  title="Save bill date"
+                                  className="p-2 rounded-lg text-purple-700 hover:bg-purple-100 disabled:text-slate-300 disabled:cursor-not-allowed cursor-pointer"
+                                >
+                                  {processingBillAction?.id === bill.id &&
+                                  processingBillAction.action === 'date' ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <Save className="w-4 h-4" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingBillDateId(null);
+                                    setBillDateDraft('');
+                                  }}
+                                  disabled={Boolean(processingBillAction)}
+                                  title="Cancel date edit"
+                                  className="p-2 rounded-lg text-slate-500 hover:bg-slate-200 disabled:text-slate-300 cursor-pointer"
+                                >
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </span>
+                            ) : (
+                              <span className="inline-flex flex-wrap items-center gap-1 text-xs text-slate-500">
+                                {new Date(bill.created_at).toLocaleString()}
+                                {isSuperAdmin && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingBillDateId(bill.id);
+                                      setBillDateDraft(getLocalDateStr(new Date(bill.created_at)));
+                                    }}
+                                    disabled={Boolean(processingBillAction)}
+                                    title={`Edit date for bill ${bill.bill_number}`}
+                                    aria-label={`Edit date for bill ${bill.bill_number}`}
+                                    className="p-2 rounded-lg text-purple-600 hover:bg-purple-100 disabled:text-slate-300 cursor-pointer"
+                                  >
+                                    <Edit3 className="w-4 h-4" />
+                                  </button>
+                                )}
+                              </span>
+                            )}
                           </div>
                           <p className="text-xs text-slate-600 mt-1">
                             {(bill.items || [])
@@ -6015,8 +6301,27 @@ export default function App() {
                               .join(', ')}
                           </p>
                         </div>
-                        <div className="text-base font-bold text-purple-950">
-                          ₹{Number(bill.total_amount).toFixed(2)}
+                        <div className="flex flex-wrap items-center justify-between gap-2 sm:justify-end">
+                          <span className="text-base font-bold text-purple-950">
+                            ₹{Number(bill.total_amount).toFixed(2)}
+                          </span>
+                          {isSuperAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteBill(bill)}
+                              disabled={Boolean(processingBillAction)}
+                              title={`Delete bill ${bill.bill_number}`}
+                              aria-label={`Delete bill ${bill.bill_number}`}
+                              className="p-2 rounded-lg text-rose-600 hover:bg-rose-100 disabled:text-slate-300 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              {processingBillAction?.id === bill.id &&
+                              processingBillAction.action === 'delete' ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-4 h-4" />
+                              )}
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
@@ -6026,8 +6331,198 @@ export default function App() {
             </div>
           )}
 
+          {adminTab === 'reports' && isAdmin && (
+            <div className="print-report-root space-y-5 rounded-2xl border border-purple-100 bg-white p-5 shadow-xs">
+              <div className="no-print flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="font-bold text-purple-950 text-lg">Printable Shop Reports</h2>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Stock reports use current data; the selected date applies only to orders.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label htmlFor="print-orders-date" className="text-xs font-semibold text-slate-600">
+                    Orders due date
+                  </label>
+                  <input
+                    id="print-orders-date"
+                    type="date"
+                    value={adminOrdersDate}
+                    onChange={(e) => setAdminOrdersDate(e.target.value)}
+                    className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-2 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    className="inline-flex items-center gap-2 rounded-xl bg-purple-700 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-600 cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4" />
+                    Print Reports
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-6 print-report-paper">
+                <section id="report-orders-due" className="print-report-section space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-base font-bold text-purple-950">
+                      Orders Due for {adminOrdersDate ? formatLongDate(adminOrdersDate) : 'Selected Date'}
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => handlePrintReportSection('orders-due')}
+                      className="no-print inline-flex items-center gap-1.5 rounded-lg border border-purple-200 bg-white px-3 py-1.5 text-xs font-semibold text-purple-800 hover:bg-purple-50 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      Print section
+                    </button>
+                  </div>
+                  {ordersForPrintDate.length === 0 ? (
+                    <p className="text-sm text-slate-500">No orders found for this date.</p>
+                  ) : (
+                    <table className="w-full border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-[#FAF8F5] text-left text-slate-600">
+                          <th className="border border-purple-100 px-2 py-1.5">Shop</th>
+                          <th className="border border-purple-100 px-2 py-1.5">Time</th>
+                          <th className="border border-purple-100 px-2 py-1.5">Customer</th>
+                          <th className="border border-purple-100 px-2 py-1.5">Contact</th>
+                          <th className="border border-purple-100 px-2 py-1.5">Order</th>
+                          <th className="border border-purple-100 px-2 py-1.5">Status</th>
+                          <th className="border border-purple-100 px-2 py-1.5 text-right">Balance Due</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ordersForPrintDate.map((order) => (
+                          <tr key={order.id}>
+                            <td className="border border-purple-100 px-2 py-1.5">
+                              {shops.find((shop) => String(shop.id) === String(order.shop_id))?.name || '—'}
+                            </td>
+                            <td className="border border-purple-100 px-2 py-1.5">{order.order_time || '—'}</td>
+                            <td className="border border-purple-100 px-2 py-1.5">{order.customer_name || '—'}</td>
+                            <td className="border border-purple-100 px-2 py-1.5">{order.contact_phone || '—'}</td>
+                            <td className="border border-purple-100 px-2 py-1.5">
+                              {[order.order_ref, order.cake_flavor, order.cake_size].filter(Boolean).join(' · ') || order.order_type || '—'}
+                            </td>
+                            <td className="border border-purple-100 px-2 py-1.5">{order.status || 'Pending'}</td>
+                            <td className="border border-purple-100 px-2 py-1.5 text-right">
+                              ₹{(Number(order.balance_due) || 0).toFixed(2)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </section>
+
+                <section id="report-out-of-stock" className="print-report-section space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-base font-bold text-purple-950">Out-of-Stock Items by Shop</h3>
+                    <button
+                      type="button"
+                      onClick={() => handlePrintReportSection('out-of-stock')}
+                      className="no-print inline-flex items-center gap-1.5 rounded-lg border border-purple-200 bg-white px-3 py-1.5 text-xs font-semibold text-purple-800 hover:bg-purple-50 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      Print section
+                    </button>
+                  </div>
+                  {printStockReport.shopSections.length === 0 ? (
+                    <p className="text-sm text-slate-500">No shops found.</p>
+                  ) : (
+                    printStockReport.shopSections.map(({ shop, outOfStockItems }) => (
+                      <div key={shop.id} className="space-y-2">
+                        <h4 className="text-sm font-semibold text-purple-900">
+                          {shop.name} ({outOfStockItems.length})
+                        </h4>
+                        {outOfStockItems.length === 0 ? (
+                          <p className="text-xs text-slate-500">No out-of-stock items.</p>
+                        ) : (
+                          <table className="w-full border-collapse text-xs">
+                            <thead>
+                              <tr className="bg-[#FAF8F5] text-left text-slate-600">
+                                <th className="border border-purple-100 px-2 py-1.5">Flavour</th>
+                                <th className="border border-purple-100 px-2 py-1.5">Category</th>
+                                <th className="border border-purple-100 px-2 py-1.5">Item</th>
+                                <th className="border border-purple-100 px-2 py-1.5 text-right">Stock</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {outOfStockItems.map((item) => (
+                                <tr key={item.key}>
+                                  <td className="border border-purple-100 px-2 py-1.5">{item.flavourName || '—'}</td>
+                                  <td className="border border-purple-100 px-2 py-1.5">{item.categoryName}</td>
+                                  <td className="border border-purple-100 px-2 py-1.5">{item.itemName}</td>
+                                  <td className="border border-purple-100 px-2 py-1.5 text-right">{item.stock}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </section>
+
+                <section id="report-current-stock" className="print-report-section space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-base font-bold text-purple-950">Current Stock Across All Shops</h3>
+                    <button
+                      type="button"
+                      onClick={() => handlePrintReportSection('current-stock')}
+                      className="no-print inline-flex items-center gap-1.5 rounded-lg border border-purple-200 bg-white px-3 py-1.5 text-xs font-semibold text-purple-800 hover:bg-purple-50 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      Print section
+                    </button>
+                  </div>
+                  {printStockReport.shopSections.length === 0 ? (
+                    <p className="text-sm text-slate-500">No shops found.</p>
+                  ) : (
+                    printStockReport.shopSections.map(({ shop, items: shopItems, flavourGroups }) => {
+                      return (
+                        <div key={shop.id} className="space-y-2">
+                          <h4 className="text-sm font-semibold text-purple-900">{shop.name}</h4>
+                          {shopItems.length === 0 ? (
+                            <p className="text-xs text-slate-500">No stock items available for this shop.</p>
+                          ) : (
+                            <table className="w-full border-collapse text-xs">
+                              <thead>
+                                <tr className="bg-[#FAF8F5] text-left text-slate-600">
+                                  <th className="border border-purple-100 px-2 py-1.5">Category</th>
+                                  <th className="border border-purple-100 px-2 py-1.5">Flavour</th>
+                                  <th className="border border-purple-100 px-2 py-1.5">Item - Count</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {flavourGroups.map((group) => (
+                                  <tr key={group.key}>
+                                    <td className="border border-purple-100 px-2 py-1.5">{group.categoryName}</td>
+                                    <td className="border border-purple-100 px-2 py-1.5">{group.flavourName || '—'}</td>
+                                    <td className="border border-purple-100 px-2 py-1.5">
+                                      <div className="space-y-1">
+                                        {group.items.map((item) => (
+                                          <div key={item.key}>{item.itemName} - {item.stock}</div>
+                                        ))}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </section>
+
+              </div>
+            </div>
+          )}
+
           {/* UNIFIED STOCK & ALERTS TAB (MERGES STOCK ALERTS + STOCK UPDATE + CURRENT STOCK AT A GLANCE) */}
-          {adminTab === 'shops' && (isSuperAdmin || isShopAdmin) && (
+          {adminTab === 'shops' && (isAdmin || isShopAdmin) && (
             <div className="space-y-6">
               {/* Top Summary KPI Cards */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -6080,7 +6575,7 @@ export default function App() {
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
                 {/* Left Column (Super Admin): Assign Stock to Shop + Transfer Stock Between Shops */}
-                {isSuperAdmin && (
+                {isAdmin && (
                   <div className="lg:col-span-4 space-y-6">
                     {/* Form 1: Assign Stock to Shop */}
                     <form
@@ -6358,7 +6853,7 @@ export default function App() {
                 )}
 
                 {/* Right Column: Unified Current Stock + Alerts + Add-to-Stock Updates */}
-                <div className={`${isSuperAdmin ? 'lg:col-span-8' : 'lg:col-span-12'} space-y-5`}>
+                <div className={`${isAdmin ? 'lg:col-span-8' : 'lg:col-span-12'} space-y-5`}>
                   {/* Filter Bar */}
                   <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-3.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -6432,7 +6927,7 @@ export default function App() {
 
                     {/* Dropdown Filters Row */}
                     <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-purple-50">
-                      {isSuperAdmin && shops.length > 0 && (
+                      {isAdmin && shops.length > 0 && (
                         <select
                           value={stockUpdateShopFilter}
                           onChange={(e) => setStockUpdateShopFilter(e.target.value)}
@@ -6518,7 +7013,7 @@ export default function App() {
                     </div>
 
                     {/* Clickable By-Shop Totals Strip (when All Shops selected) */}
-                    {isSuperAdmin &&
+                    {isAdmin &&
                       stockUpdateShopFilter === 'ALL' &&
                       unifiedStockData.perShopTotals.length > 1 && (
                         <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-purple-50 text-xs">
@@ -6715,7 +7210,7 @@ export default function App() {
           )}
 
           {/* ADMIN TAB: MENU EDITOR (TABULAR VIEW PER CATEGORY) */}
-          {adminTab === 'inventory' && isSuperAdmin && (
+          {adminTab === 'inventory' && isAdmin && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
               {/* Left Column: Step 1 Category -> Step 2 Shop Expense % -> Step 3 Flavour / Item -> Step 4 Type / Product */}
               <div className="lg:col-span-3 space-y-6">
@@ -7309,7 +7804,7 @@ export default function App() {
           )}
 
           {/* ADMIN TAB 3: SHOPS CREATION, DATABASE USERS & PASSWORD MANAGEMENT */}
-          {adminTab === 'users' && isSuperAdmin && (
+          {adminTab === 'users' && isAdmin && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
               {/* Left Column: Create Shop & Add New User to DB */}
               <div className="lg:col-span-4 space-y-6">
@@ -7427,7 +7922,10 @@ export default function App() {
                     >
                       <option value="staff">Sales Profile / Cashier (Billing Only)</option>
                       <option value="shop-admin">Shop Admin (Billing + Shop Dashboard)</option>
-                      <option value="admin">Super Admin (All Shops & Settings)</option>
+                      <option value="admin">Admin (All Operations Except Bill Changes)</option>
+                      {isSuperAdmin && (
+                        <option value="superadmin">Super Admin (All Shops & Settings)</option>
+                      )}
                     </select>
                   </div>
 
@@ -7511,7 +8009,16 @@ export default function App() {
                               key={u.id}
                               user={u}
                               assignedShopName={assignedShopObj?.name}
+                              shops={shops}
+                              canChangeRole={
+                                isSuperAdmin && String(currentLoggedInUser?.id) !== String(u.id)
+                              }
+                              isCurrentUser={
+                                isSuperAdmin &&
+                                String(currentLoggedInUser?.id) === String(u.id)
+                              }
                               onUpdatePassword={handleUpdateDbUserPassword}
+                              onUpdateRole={handleUpdateDbUserRole}
                               onDelete={handleDeleteDbUser}
                             />
                           );
@@ -7976,9 +8483,34 @@ function DueOrderBillRow({ order, todayStr, onSettle }) {
 }
 
 // Helper Component for Inline Database User Password Management
-function UserRow({ user, assignedShopName, onUpdatePassword, onDelete }) {
+function UserRow({
+  user,
+  assignedShopName,
+  shops,
+  canChangeRole,
+  isCurrentUser,
+  onUpdatePassword,
+  onUpdateRole,
+  onDelete
+}) {
   const [passDraft, setPassDraft] = useState('');
   const [isSavingPass, setIsSavingPass] = useState(false);
+  const [roleDraft, setRoleDraft] = useState(user.role);
+  const [roleShopIdDraft, setRoleShopIdDraft] = useState(user.shop_id || '');
+  const [isSavingRole, setIsSavingRole] = useState(false);
+  let roleLabel = user.role;
+  if (roleLabel === 'superadmin') roleLabel = 'Super Admin';
+  else if (roleLabel === 'admin') roleLabel = 'Admin';
+
+  useEffect(() => {
+    setRoleDraft(user.role);
+    setRoleShopIdDraft(user.shop_id || '');
+  }, [user.role, user.shop_id]);
+
+  const roleNeedsShop = roleDraft === 'staff' || roleDraft === 'shop-admin';
+  const roleIsUnchanged =
+    roleDraft === user.role &&
+    String(roleShopIdDraft || '') === String(user.shop_id || '');
 
   const handleSavePass = async () => {
     if (!passDraft.trim() || isSavingPass) return;
@@ -7991,15 +8523,75 @@ function UserRow({ user, assignedShopName, onUpdatePassword, onDelete }) {
     }
   };
 
+  const handleSaveRole = async () => {
+    if (!canChangeRole || isSavingRole || roleIsUnchanged) return;
+    setIsSavingRole(true);
+    try {
+      await onUpdateRole(user.id, roleDraft, roleShopIdDraft);
+    } finally {
+      setIsSavingRole(false);
+    }
+  };
+
   return (
     <tr className="hover:bg-[#FAF8F5]/80">
       <td data-label="Username" className="py-3.5 px-5 font-semibold text-slate-900">{user.username}</td>
       <td data-label="Role & Shop" className="py-3.5 px-4">
         <span className="px-2.5 py-1 rounded-md bg-purple-100 text-purple-800 text-xs font-semibold uppercase">
-          {user.role}
+          {roleLabel}
         </span>
         {assignedShopName && (
           <span className="block text-xs text-slate-500 mt-1">Shop: {assignedShopName}</span>
+        )}
+        {canChangeRole && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <select
+              aria-label={`Role for ${user.username}`}
+              value={roleDraft}
+              onChange={(e) => setRoleDraft(e.target.value)}
+              className="max-w-full bg-white border border-purple-200 rounded-lg px-2 py-1.5 text-xs text-purple-950 focus:outline-none focus:border-purple-600"
+            >
+              <option value="staff">Staff</option>
+              <option value="shop-admin">Shop Admin</option>
+              <option value="admin">Admin</option>
+              <option value="superadmin">Super Admin</option>
+            </select>
+            {roleNeedsShop && (
+              <select
+                aria-label={`Assigned shop for ${user.username}`}
+                value={roleShopIdDraft}
+                onChange={(e) => setRoleShopIdDraft(e.target.value)}
+                className="max-w-full bg-white border border-purple-200 rounded-lg px-2 py-1.5 text-xs text-purple-950 focus:outline-none focus:border-purple-600"
+              >
+                <option value="">Select shop</option>
+                {shops.map((shop) => (
+                  <option key={shop.id} value={shop.id}>
+                    {shop.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              onClick={handleSaveRole}
+              disabled={
+                isSavingRole ||
+                roleIsUnchanged ||
+                (roleNeedsShop && !roleShopIdDraft)
+              }
+              className="inline-flex items-center gap-1 rounded-lg bg-purple-700 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-purple-600 disabled:bg-slate-100 disabled:text-slate-400 cursor-pointer disabled:cursor-not-allowed"
+            >
+              {isSavingRole ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Save className="w-3.5 h-3.5" />
+              )}
+              Save Role
+            </button>
+          </div>
+        )}
+        {!canChangeRole && isCurrentUser && (
+          <span className="block mt-1 text-[11px] text-slate-500">Your own role cannot be changed here.</span>
         )}
       </td>
       <td data-label="Update Password" className="py-3.5 px-4">
