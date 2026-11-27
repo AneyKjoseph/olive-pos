@@ -43,6 +43,7 @@ export default function MenuItemEditor({
   }, [isShopDropdownOpen]);
 
   const currentAvailableShopIds = item.available_shop_ids ?? shops.map((shop) => shop.id);
+  const currentAvailableShopIdsKey = JSON.stringify(currentAvailableShopIds);
   const isDirty =
     typeName.trim() !== item.name ||
     Number(price) !== Number(item.price) ||
@@ -57,7 +58,7 @@ export default function MenuItemEditor({
     setCategoryId(item.category_id || '');
     setImageUrl(item.image_url || '');
     setIsDisplayed(item.is_displayed !== false);
-    setAvailableShopIds(item.available_shop_ids ?? shops.map((shop) => shop.id));
+    setAvailableShopIds(JSON.parse(currentAvailableShopIdsKey));
   }, [
     item.id,
     item.name,
@@ -65,8 +66,7 @@ export default function MenuItemEditor({
     item.category_id,
     item.image_url,
     item.is_displayed,
-    item.available_shop_ids,
-    shops
+    currentAvailableShopIdsKey
   ]);
 
   useEffect(() => {

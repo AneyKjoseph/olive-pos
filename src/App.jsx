@@ -296,6 +296,7 @@ export default function App() {
   // Admin Orders Dashboard State
   const [adminOrdersDate, setAdminOrdersDate] = useState(() => getLocalDateStr());
   const [adminOrdersShopFilter, setAdminOrdersShopFilter] = useState('ALL');
+  const [printReportCategoryFilter, setPrintReportCategoryFilter] = useState('ALL');
   const [editingOrder, setEditingOrder] = useState(null);
   const [isSavingOrderEdit, setIsSavingOrderEdit] = useState(false);
   const [previewOrderImageUrl, setPreviewOrderImageUrl] = useState('');
@@ -1345,6 +1346,10 @@ export default function App() {
 
   const handleBatchUpdateShopStock = async (updates, draftTarget = 'stock', batchKey = 'default') => {
     if (!updates || updates.length === 0 || updatingBatchKey) return;
+    if (!isAdmin && updates.some((update) => update.replace)) {
+      showToast('Only an Admin can replace stock counts.', 'error');
+      return;
+    }
 
     const timestamp = new Date().toISOString();
     setUpdatingBatchKey(batchKey);
@@ -2432,6 +2437,10 @@ export default function App() {
 
   const handleCreateItem = async (e) => {
     e.preventDefault();
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit the menu.', 'error');
+      return;
+    }
     if (isCreatingItem) return;
     if (!newItemCategory) {
       showToast('Please create and select a category first.', 'error');
@@ -2551,6 +2560,10 @@ export default function App() {
     availableShopIds,
     suppressSuccessToast = false
   ) => {
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit menu items.', 'error');
+      return false;
+    }
     const parsedPrice = Math.max(0, Number(newPrice) || 0);
     const targetItem = items.find((i) => i.id === itemId);
     const isItemBilled = billedItemIds.has(itemId);
@@ -2627,6 +2640,10 @@ export default function App() {
   };
 
   const handleSaveMenuCategory = async (categoryId, categoryName, categoryItems) => {
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit menu items.', 'error');
+      return;
+    }
     if (savingMenuCategoryIds.has(categoryId)) return;
     const pendingUpdates = categoryItems
       .map((item) => ({ item, draft: menuItemDrafts[item.id] }))
@@ -2671,6 +2688,10 @@ export default function App() {
 
   // Delete a single Item (Type / Product) if it is not referenced in any generated bill
   const handleDeleteCatalogItem = async (item) => {
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit the menu.', 'error');
+      return;
+    }
     if (!item?.id) return;
     if (billedItemIds.has(item.id)) {
       showToast(`Cannot delete "${item.name}" because it already exists in generated bills.`, 'error');
@@ -2700,6 +2721,10 @@ export default function App() {
 
   // Delete a Sub-Category (Flavour / Item) and its unbilled items if none are billed
   const handleDeleteSubcategoryGroup = async (category, subcategory) => {
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit the menu.', 'error');
+      return;
+    }
     if (!subcategory?.id) return;
     const subItems = items.filter((it) => String(it.subcategory_id) === String(subcategory.id));
     const hasBilledSubItem =
@@ -2756,6 +2781,10 @@ export default function App() {
 
   // Delete a Category and its subcategories/unbilled items if no billed items belong to it
   const handleDeleteCategoryGroup = async (category) => {
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit the menu.', 'error');
+      return;
+    }
     if (!category?.id) return;
     const catItems = items.filter((it) => String(it.category_id) === String(category.id));
     const hasBilledCatItem =
@@ -2816,6 +2845,10 @@ export default function App() {
 
   const handleAddCategory = async (e) => {
     e.preventDefault();
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit the menu.', 'error');
+      return;
+    }
     if (isCreatingCategory) return;
     if (!newCategoryName.trim()) {
       showToast('Enter a valid category name.', 'error');
@@ -2874,6 +2907,10 @@ export default function App() {
 
   const handleAddSubcategory = async (e) => {
     e.preventDefault();
+    if (!isSuperAdmin) {
+      showToast('Only a Super Admin can edit the menu.', 'error');
+      return;
+    }
     if (isAddingSubcategory) return;
     const cleanSub = newSubcategoryName.trim();
     if (!newSubcategoryParentId || !cleanSub) {
@@ -3511,7 +3548,12 @@ export default function App() {
   ]);
 
   const printStockReport = useMemo(() => {
-    const displayedItems = items.filter(isItemDisplayed);
+    const displayedItems = items.filter(
+      (item) =>
+        isItemDisplayed(item) &&
+        (printReportCategoryFilter === 'ALL' ||
+          String(item.category_id) === String(printReportCategoryFilter))
+    );
     const categoryNames = new Map(categories.map((category) => [String(category.id), category.name]));
     const subcategoryNames = new Map(
       subcategories.map((subcategory) => [String(subcategory.id), subcategory.name])
@@ -3523,12 +3565,18 @@ export default function App() {
       stockByShop.get(shopKey).set(String(allocation.item_id), Number(allocation.stock) || 0);
     });
 
-    const shopSections = shops.map((shop) => {
+    const reportShops = isShopAdmin
+      ? shops.filter(
+          (shop) => String(shop.id) === String(currentLoggedInUser?.shop_id)
+        )
+      : shops;
+    const shopSections = reportShops.map((shop) => {
       const shopStock = stockByShop.get(String(shop.id));
       const shopItems = displayedItems
         .filter((item) => isItemAvailableAtShop(item, shop.id))
         .map((item) => ({
           key: `${shop.id}:${item.id}`,
+          isDisplayed: item.is_displayed === true,
           categoryId: item.category_id,
           itemName: item.name || '',
           categoryName: categoryNames.get(String(item.category_id)) || 'Uncategorized',
@@ -3562,20 +3610,43 @@ export default function App() {
         shop,
         items: shopItems,
         flavourGroups: Array.from(flavourGroupsByKey.values()),
-        outOfStockItems: shopItems.filter((item) => item.stock <= 0)
+        outOfStockItems: shopItems.filter(
+          (item) => item.stock <= 0 && item.isDisplayed
+        )
       };
     });
 
     return { shopSections };
-  }, [shops, shopStocks, items, categories, subcategories]);
+  }, [
+    shops,
+    shopStocks,
+    items,
+    categories,
+    subcategories,
+    isShopAdmin,
+    currentLoggedInUser,
+    printReportCategoryFilter
+  ]);
 
   const ordersForPrintDate = useMemo(
     () =>
       orders
-        .filter((order) => order.order_date === adminOrdersDate)
+        .filter(
+          (order) =>
+            order.order_date === adminOrdersDate &&
+            (!isShopAdmin ||
+              !order.shop_id ||
+              String(order.shop_id) === String(currentLoggedInUser?.shop_id))
+        )
         .sort((a, b) => (a.order_time || '99:99').localeCompare(b.order_time || '99:99')),
-    [orders, adminOrdersDate]
+    [orders, adminOrdersDate, isShopAdmin, currentLoggedInUser]
   );
+  const printReportCategoryName =
+    printReportCategoryFilter === 'ALL'
+      ? ''
+      : categories.find(
+          (category) => String(category.id) === String(printReportCategoryFilter)
+        )?.name || 'Selected category';
 
   // Distinct in-stock Categories for Sales POS filter bar
   const distinctInStockPosCategories = useMemo(() => {
@@ -3907,25 +3978,27 @@ export default function App() {
                 <button
                   onClick={() => setActiveRole('sales')}
                   aria-label="Sales Terminal"
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                  className={`flex min-h-10 items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
                     activeRole === 'sales'
                       ? 'bg-purple-600 text-white shadow-sm'
                       : 'text-slate-600 hover:text-purple-900'
                   }`}
                 >
                   <UserCheck className="w-4 h-4" />
+                  <span className="sm:hidden">Sales</span>
                   <span className="hidden sm:inline">Sales Terminal</span>
                 </button>
                 <button
                   onClick={() => setActiveRole('admin')}
                   aria-label={isShopAdmin ? 'Shop Dashboard' : 'Admin Panel'}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
+                  className={`flex min-h-10 items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-all ${
                     activeRole === 'admin'
                       ? 'bg-purple-800 text-white shadow-sm'
                       : 'text-slate-600 hover:text-purple-900'
                   }`}
                 >
                   <ShieldCheck className="w-4 h-4" />
+                  <span className="sm:hidden">{isShopAdmin ? 'Shop' : 'Admin'}</span>
                   <span className="hidden sm:inline">{isShopAdmin ? 'Shop Dashboard' : 'Admin Panel'}</span>
                 </button>
               </div>
@@ -3933,7 +4006,8 @@ export default function App() {
 
             <button
               onClick={handleAdminLogout}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs sm:text-sm font-semibold border border-rose-200 transition-colors"
+              aria-label="Log out"
+              className="flex min-h-10 min-w-10 items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs sm:text-sm font-semibold border border-rose-200 transition-colors"
               title="Logout"
             >
               <LogOut className="w-4 h-4" />
@@ -3958,7 +4032,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setIsMobileCartOpen((prev) => !prev)}
-              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-gradient-to-r from-purple-600 to-violet-700 hover:from-purple-500 hover:to-violet-600 text-white shadow-lg shadow-purple-700/25 text-xs sm:text-sm font-bold transition-all cursor-pointer"
+              className="inline-flex min-h-11 items-center gap-2 px-3.5 py-2.5 rounded-2xl bg-gradient-to-r from-purple-600 to-violet-700 hover:from-purple-500 hover:to-violet-600 text-white shadow-lg shadow-purple-700/25 text-xs sm:text-sm font-bold transition-all cursor-pointer"
             >
               <ShoppingCart className="w-4 h-4" />
               <span>Cart</span>
@@ -4028,7 +4102,7 @@ export default function App() {
                     setOrderDueViewMode('due');
                     setActiveRole('orders');
                   }}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
+                  className={`inline-flex min-h-10 items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer ${
                     shopOrdersSummary.dueTodayOrOverdue.length > 0
                       ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-300'
                       : 'bg-[#FAF8F5] hover:bg-purple-50 text-purple-900 border-purple-200'
@@ -4046,7 +4120,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setActiveRole('orders')}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-600 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+                  className="inline-flex min-h-10 items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-600 text-white text-xs font-semibold shadow-xs transition-colors cursor-pointer"
                 >
                   <ClipboardList className="w-3.5 h-3.5" />
                   <span>Accept Order</span>
@@ -4130,13 +4204,13 @@ export default function App() {
                 </div>
 
                 {/* Distinct Categories Filter */}
-                <div className="flex min-w-0 flex-wrap items-center gap-1.5 pb-1 sm:pb-0">
+                <div role="group" aria-label="Filter products by category" className="flex min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto overscroll-x-contain pb-2 sm:flex-wrap sm:overflow-visible sm:pb-0">
                   <button
                     onClick={() => {
                       setSelectedCategoryFilter('ALL');
                       setSelectedSubcategoryFilter('ALL');
                     }}
-                    className={`px-3.5 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-colors ${
+                    className={`min-h-11 shrink-0 px-3.5 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-colors ${
                       selectedCategoryFilter === 'ALL'
                         ? 'bg-purple-600 text-white shadow-xs'
                         : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
@@ -4155,7 +4229,7 @@ export default function App() {
                           setSelectedCategoryFilter(cat.id);
                           setSelectedSubcategoryFilter('ALL');
                         }}
-                        className={`px-3.5 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-colors ${
+                        className={`min-h-11 shrink-0 px-3.5 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-colors ${
                           selectedCategoryFilter === cat.id
                             ? 'bg-purple-600 text-white shadow-xs'
                             : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
@@ -4170,13 +4244,13 @@ export default function App() {
 
               {/* Distinct Flavour / Item Filter Row */}
               {activePosSubcategories.length > 0 && (
-                <div className="flex min-w-0 flex-wrap items-center gap-2 pt-2.5 border-t border-purple-50">
-                  <span className="text-xs font-semibold text-slate-500 mr-1">
+                <div role="group" aria-label="Filter products by flavour" className="flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto overscroll-x-contain pt-2.5 pb-1 border-t border-purple-50 sm:flex-wrap sm:overflow-visible">
+                  <span className="shrink-0 text-xs font-semibold text-slate-500 mr-1">
                     Flavours / Items:
                   </span>
                   <button
                     onClick={() => setSelectedSubcategoryFilter('ALL')}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    className={`min-h-10 shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                       selectedSubcategoryFilter === 'ALL'
                         ? 'bg-purple-100 text-purple-900 border border-purple-300'
                         : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900'
@@ -4197,7 +4271,7 @@ export default function App() {
                       <button
                         key={sc.id}
                         onClick={() => setSelectedSubcategoryFilter(sc.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                        className={`min-h-10 shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
                           selectedSubcategoryFilter === sc.id
                             ? 'bg-purple-100 text-purple-900 border border-purple-300'
                             : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900'
@@ -4245,7 +4319,7 @@ export default function App() {
                 </p>
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
+              <div className="grid grid-cols-1 min-[360px]:grid-cols-2 gap-2.5 sm:grid-cols-2 sm:gap-3.5 xl:grid-cols-3">
                 {visiblePosItems.map((item) => {
                   const cat = categories.find((c) => c.id === item.category_id);
                   const subcat = subcategories.find((sc) => sc.id === item.subcategory_id);
@@ -4255,30 +4329,30 @@ export default function App() {
                     <div
                       key={item.id}
                       onClick={() => addToCart(item)}
-                      className="group relative rounded-2xl border overflow-hidden transition-all flex flex-col justify-between bg-white border-purple-100 hover:border-purple-400 hover:shadow-md hover:shadow-purple-900/5 cursor-pointer active:scale-[0.98]"
+                      className="group relative rounded-xl sm:rounded-2xl border overflow-hidden transition-all flex flex-col justify-between bg-white border-purple-100 hover:border-purple-400 hover:shadow-md hover:shadow-purple-900/5 cursor-pointer active:scale-[0.98]"
                     >
-                      <div className="p-3.5 pb-2.5">
-                        <div className="flex items-start gap-3">
+                      <div className="p-2.5 pb-2 sm:p-3.5 sm:pb-2.5">
+                        <div className="flex items-start gap-2 sm:gap-3">
                           {/* Round Image Inside Container */}
                           {item.image_url ? (
                             <img
                               src={item.image_url}
                               alt={item.name}
-                              className="w-14 h-14 rounded-full object-cover border border-purple-200 shrink-0 group-hover:scale-105 transition-transform duration-200"
+                              className="w-10 h-10 sm:w-14 sm:h-14 rounded-full object-cover border border-purple-200 shrink-0 group-hover:scale-105 transition-transform duration-200"
                             />
                           ) : (
-                            <div className="w-14 h-14 rounded-full bg-purple-100/70 border border-purple-200/70 text-purple-600 flex items-center justify-center shrink-0">
-                              <Package className="w-6 h-6" />
+                            <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-full bg-purple-100/70 border border-purple-200/70 text-purple-600 flex items-center justify-center shrink-0">
+                              <Package className="w-5 h-5 sm:w-6 sm:h-6" />
                             </div>
                           )}
 
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-1.5 mb-1">
-                              <span className="text-xs font-medium px-2 py-0.5 rounded-md bg-[#FAF8F5] text-purple-800 border border-purple-100 truncate">
+                              <span className="min-w-0 text-[10px] sm:text-xs font-medium px-1.5 sm:px-2 py-0.5 rounded-md bg-[#FAF8F5] text-purple-800 border border-purple-100 truncate">
                                 {cat?.name || 'General'}
                               </span>
                               <span
-                                className={`text-xs font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                                className={`text-[10px] sm:text-xs font-bold px-1.5 sm:px-2 py-0.5 rounded-full shrink-0 ${
                                   item.stock <= 5
                                     ? 'bg-amber-100 text-amber-800'
                                     : 'bg-purple-100 text-purple-800'
@@ -4288,7 +4362,7 @@ export default function App() {
                               </span>
                             </div>
                             <h3
-                              className="font-bold text-slate-900 text-sm sm:text-base leading-snug truncate"
+                              className="font-bold text-slate-900 text-xs sm:text-base leading-snug line-clamp-2 sm:truncate"
                               title={item.name}
                             >
                               {item.name}
@@ -4302,14 +4376,14 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between border-t border-purple-50 px-3.5 py-2.5 mt-1 bg-[#FAF8F5]/60">
-                        <span className="font-extrabold text-purple-950 flex items-center text-base">
-                          <IndianRupee className="w-4 h-4 text-purple-600" />
+                      <div className="flex items-center justify-between gap-1 border-t border-purple-50 px-2.5 sm:px-3.5 py-2.5 mt-1 bg-[#FAF8F5]/60">
+                        <span className="font-extrabold text-purple-950 flex items-center text-sm sm:text-base">
+                          <IndianRupee className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-600" />
                           {Number(item.price).toFixed(2)}
                         </span>
                         <button
                           type="button"
-                          className={`rounded-xl font-semibold flex items-center gap-1 px-3 py-1.5 text-xs transition-colors ${
+                          className={`min-h-10 rounded-xl font-semibold flex items-center gap-1 px-2 sm:px-3 py-1.5 text-xs transition-colors ${
                             inCart
                               ? 'bg-purple-700 text-white shadow-2xs'
                               : 'bg-purple-100/80 text-purple-800 group-hover:bg-purple-600 group-hover:text-white'
@@ -5392,8 +5466,8 @@ export default function App() {
       {activeRole === 'admin' && isAdminAuthenticated && (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
           {/* Admin Sub-Navigation */}
-          <div className="flex flex-wrap items-center justify-between gap-4 bg-white border border-purple-100 shadow-xs p-4 rounded-2xl">
-            <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-purple-100 shadow-xs p-2 sm:p-4 rounded-2xl">
+            <div className="admin-tab-scroll w-full sm:w-auto">
               <button
                 onClick={() => setAdminTab('analytics')}
                 className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
@@ -5464,42 +5538,44 @@ export default function App() {
                 )}
               </button>
 
+              {isSuperAdmin && (
+                <button
+                  onClick={() => setAdminTab('inventory')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+                    adminTab === 'inventory'
+                      ? 'bg-purple-700 text-white shadow-sm'
+                      : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
+                  }`}
+                >
+                  <Layers className="w-4 h-4" />
+                  Menu Editor
+                </button>
+              )}
+              {(isAdmin || isShopAdmin) && (
+                <button
+                  onClick={() => setAdminTab('reports')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+                    adminTab === 'reports'
+                      ? 'bg-purple-700 text-white shadow-sm'
+                      : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
+                  }`}
+                >
+                  <Printer className="w-4 h-4" />
+                  Print Reports
+                </button>
+              )}
               {isAdmin && (
-                <>
-                  <button
-                    onClick={() => setAdminTab('inventory')}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-                      adminTab === 'inventory'
-                        ? 'bg-purple-700 text-white shadow-sm'
-                        : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
-                    }`}
-                  >
-                    <Layers className="w-4 h-4" />
-                    Menu Editor
-                  </button>
-                  <button
-                    onClick={() => setAdminTab('reports')}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-                      adminTab === 'reports'
-                        ? 'bg-purple-700 text-white shadow-sm'
-                        : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
-                    }`}
-                  >
-                    <Printer className="w-4 h-4" />
-                    Print Reports
-                  </button>
-                  <button
-                    onClick={() => setAdminTab('users')}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
-                      adminTab === 'users'
-                        ? 'bg-purple-700 text-white shadow-sm'
-                        : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
-                    }`}
-                  >
-                    <Users className="w-4 h-4" />
-                    Manage Users/Shops
-                  </button>
-                </>
+                <button
+                  onClick={() => setAdminTab('users')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+                    adminTab === 'users'
+                      ? 'bg-purple-700 text-white shadow-sm'
+                      : 'bg-[#FAF8F5] text-slate-600 hover:text-purple-900 border border-purple-100'
+                  }`}
+                >
+                  <Users className="w-4 h-4" />
+                  Manage Users/Shops
+                </button>
               )}
             </div>
 
@@ -6363,16 +6439,32 @@ export default function App() {
             </div>
           )}
 
-          {adminTab === 'reports' && isAdmin && (
+          {adminTab === 'reports' && (isAdmin || isShopAdmin) && (
             <div className="print-report-root space-y-5 rounded-2xl border border-purple-100 bg-white p-5 shadow-xs">
               <div className="no-print flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <h2 className="font-bold text-purple-950 text-lg">Printable Shop Reports</h2>
                   <p className="text-xs text-slate-500 mt-1">
-                    Stock reports use current data; the selected date applies only to orders.
+                    The category filter applies to stock reports; the selected date applies to orders.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
+                  <label htmlFor="print-stock-category" className="text-xs font-semibold text-slate-600">
+                    Stock category
+                  </label>
+                  <select
+                    id="print-stock-category"
+                    value={printReportCategoryFilter}
+                    onChange={(e) => setPrintReportCategoryFilter(e.target.value)}
+                    className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-3 py-2 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                  >
+                    <option value="ALL">All categories</option>
+                    {categories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
                   <label htmlFor="print-orders-date" className="text-xs font-semibold text-slate-600">
                     Orders due date
                   </label>
@@ -6449,7 +6541,10 @@ export default function App() {
 
                 <section id="report-out-of-stock" className="print-report-section space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h3 className="text-base font-bold text-purple-950">Out-of-Stock Items by Shop</h3>
+                    <h3 className="text-base font-bold text-purple-950">
+                      Out-of-Stock Items by Shop
+                      {printReportCategoryName ? ` — ${printReportCategoryName}` : ''}
+                    </h3>
                     <button
                       type="button"
                       onClick={() => handlePrintReportSection('out-of-stock')}
@@ -6498,7 +6593,17 @@ export default function App() {
 
                 <section id="report-current-stock" className="print-report-section space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h3 className="text-base font-bold text-purple-950">Current Stock Across All Shops</h3>
+                    <h3 className="text-base font-bold text-purple-950">
+                      {printReportCategoryName
+                        ? `Current Stock — ${printReportCategoryName}${
+                            isShopAdmin
+                              ? ` (${currentActiveShop?.name || 'My Shop'})`
+                              : ' (All Shops)'
+                          }`
+                        : isShopAdmin
+                        ? `Current Stock — ${currentActiveShop?.name || 'My Shop'}`
+                        : 'Current Stock Across All Shops'}
+                    </h3>
                     <button
                       type="button"
                       onClick={() => handlePrintReportSection('current-stock')}
@@ -6891,10 +6996,10 @@ export default function App() {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <h3 className="font-bold text-purple-950 text-base">
-                          Current Stock, Alerts & Quick Add
+                          Current Stock, Alerts & Quick Update
                         </h3>
                         <p className="text-xs text-slate-500 mt-0.5">
-                          Enter a quantity in <strong>+ Add</strong> to add to current stock, then click the category-level <strong>Update</strong> button.
+                          Add stock to the current count. Admins can also set an exact count. Click the category-level <strong>Update</strong> button to save.
                         </p>
                       </div>
 
@@ -7074,9 +7179,9 @@ export default function App() {
                       {unifiedStockData.shopSections.map(({ shop, shopTotalStock, categorySections }) => (
                         <div
                           key={shop.id}
-                          className="bg-white border border-purple-200 shadow-xs rounded-2xl overflow-hidden"
+                          className="bg-white border border-purple-200 shadow-xs rounded-2xl"
                         >
-                          <div className="px-5 py-3.5 bg-purple-900 text-white flex flex-wrap items-center justify-between gap-2">
+                          <div className="px-5 py-3.5 rounded-t-2xl bg-purple-900 text-white flex flex-wrap items-center justify-between gap-2">
                             <div className="flex items-center gap-2">
                               <Store className="w-4 h-4 text-purple-200" />
                               <span className="font-bold text-sm">{shop.name}</span>
@@ -7100,9 +7205,14 @@ export default function App() {
                                 const catDirtyUpdates = catSec.catItems
                                   .map((it) => {
                                     const draftKey = `${shop.id}::${it.id}`;
-                                    const addRaw = stockDrafts[draftKey];
-                                    const addQty = parseInt(addRaw, 10);
-                                    if (!addRaw || isNaN(addQty) || addQty <= 0) return null;
+                                    const draft = stockDrafts[draftKey] || {};
+                                    const quantity = parseInt(draft.value, 10);
+                                    const isSetMode = isAdmin && draft.mode === 'set';
+                                    const hasValidQuantity =
+                                      draft.value !== '' &&
+                                      !isNaN(quantity) &&
+                                      (isSetMode ? quantity >= 0 : quantity > 0);
+                                    if (!hasValidQuantity) return null;
                                     const alloc = shopStocks.find(
                                       (ss) => ss.shop_id === shop.id && ss.item_id === it.id
                                     );
@@ -7110,7 +7220,8 @@ export default function App() {
                                     return {
                                       shopId: shop.id,
                                       itemId: it.id,
-                                      stock: currentStock + addQty
+                                      stock: isSetMode ? quantity : currentStock + quantity,
+                                      replace: isSetMode
                                     };
                                   })
                                   .filter(Boolean);
@@ -7120,9 +7231,9 @@ export default function App() {
                                 return (
                                   <div
                                     key={`${shop.id}-${catSec.category.id}`}
-                                    className="border border-purple-100 rounded-xl overflow-hidden"
+                                    className="border border-purple-100 rounded-xl"
                                   >
-                                    <div className="px-4 py-2.5 bg-purple-50 border-b border-purple-100 flex flex-wrap items-center justify-between gap-2">
+                                    <div className="sticky top-24 sm:top-16 z-20 px-4 py-2.5 rounded-t-xl bg-purple-50 border-b border-purple-100 shadow-sm flex flex-wrap items-center justify-between gap-2">
                                       <div className="flex flex-wrap items-center gap-2">
                                         <span className="font-bold text-purple-950 text-xs sm:text-sm">
                                           Category: {catSec.category.name}
@@ -7186,7 +7297,7 @@ export default function App() {
                                           <tr className="bg-[#FAF8F5] border-b border-purple-100 text-[11px] uppercase tracking-wider text-slate-500">
                                             <th className="py-2.5 px-4 w-48">Flavour / Item</th>
                                             <th className="py-2.5 px-4">
-                                              Types, Current Stock Badge & Add Stock
+                                              Types, Current Stock, Add Stock & Set Count
                                             </th>
                                           </tr>
                                         </thead>
@@ -7199,22 +7310,39 @@ export default function App() {
                                               <td data-label="Flavour / Item" className="py-2.5 px-4 font-bold text-purple-950 text-xs sm:text-sm">
                                                 {fg.flavourName}
                                               </td>
-                                              <td data-label="Types, Current Stock & Add Stock" className="py-2.5 px-4">
+                                              <td data-label="                                              Types, Current Stock & Update" className="py-2.5 px-4">
                                                 <div className="flex flex-wrap items-center gap-2">
                                                   {fg.entries.map(({ item, currentStock, status }) => {
                                                     const draftKey = `${shop.id}::${item.id}`;
-                                                    const addValue = stockDrafts[draftKey] ?? '';
+                                                    const draft = stockDrafts[draftKey] || {};
                                                     return (
                                                       <StockItemEditor
                                                         key={`${shop.id}-${catSec.category.id}-${item.id}`}
                                                         item={item}
                                                         stock={currentStock}
                                                         status={status}
-                                                        addValue={addValue}
-                                                        onChange={(val) =>
+                                                        mode={isAdmin ? draft.mode || 'add' : 'add'}
+                                                        value={draft.value || ''}
+                                                        canSet={isAdmin}
+                                                        onModeChange={(mode) =>
                                                           setStockDrafts((prev) => ({
                                                             ...prev,
-                                                            [draftKey]: val
+                                                            [draftKey]: {
+                                                              ...prev[draftKey],
+                                                              mode
+                                                            }
+                                                          }))
+                                                        }
+                                                        onValueChange={(value) =>
+                                                          setStockDrafts((prev) => ({
+                                                            ...prev,
+                                                            [draftKey]: {
+                                                              ...prev[draftKey],
+                                                              mode: isAdmin
+                                                                ? prev[draftKey]?.mode || 'add'
+                                                                : 'add',
+                                                              value
+                                                            }
                                                           }))
                                                         }
                                                       />
@@ -7242,7 +7370,7 @@ export default function App() {
           )}
 
           {/* ADMIN TAB: MENU EDITOR (TABULAR VIEW PER CATEGORY) */}
-          {adminTab === 'inventory' && isAdmin && (
+          {adminTab === 'inventory' && isSuperAdmin && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
               {/* Left Column: Step 1 Category -> Step 2 Shop Expense % -> Step 3 Flavour / Item -> Step 4 Type / Product */}
               <div className="lg:col-span-3 space-y-6">
