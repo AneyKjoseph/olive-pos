@@ -34,23 +34,21 @@ import {
   Clock,
   Phone,
   Sparkles,
+  Globe,
   Edit3,
-  Eye,
   Printer
 } from 'lucide-react';
 import MenuItemEditor from './components/MenuItemEditor.jsx';
 import SearchableSelect from './components/SearchableSelect.jsx';
 import StockItemEditor from './components/StockItemEditor.jsx';
 
-// Resize uploaded image to a compact JPEG data URL so it saves cleanly in Supabase & loads fast
-const compressImageToDataUrl = (file, maxDimension = 280) =>
+const compressImageToDataUrl = (file, maxDimension = 480) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let { width, height } = img;
+      const image = new Image();
+      image.onload = () => {
+        let { width, height } = image;
         if (width > height && width > maxDimension) {
           height = Math.round((height * maxDimension) / width);
           width = maxDimension;
@@ -58,14 +56,15 @@ const compressImageToDataUrl = (file, maxDimension = 280) =>
           width = Math.round((width * maxDimension) / height);
           height = maxDimension;
         }
+        const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
+        const context = canvas.getContext('2d');
+        context.drawImage(image, 0, 0, width, height);
         resolve(canvas.toDataURL('image/jpeg', 0.78));
       };
-      img.onerror = reject;
-      img.src = event.target.result;
+      image.onerror = reject;
+      image.src = event.target.result;
     };
     reader.onerror = reject;
     reader.readAsDataURL(file);
@@ -110,6 +109,20 @@ const AUTH_SESSION_STORAGE_KEY = 'olive_pos_auth_session';
 const SESSION_DURATION_MS = 2 * 60 * 60 * 1000; // 2 hours
 const COMMON_ERROR_MESSAGE = 'An error occured Contact Admin';
 const ORDERS_FALLBACK_STORAGE_KEY = 'olive_pos_orders_fallback';
+const BILL_SALES_CHANNELS = [
+  { id: 'shop_pos', label: 'Shop POS' },
+  { id: 'zomato', label: 'Zomato' },
+  { id: 'swiggy', label: 'Swiggy' }
+];
+const getBillSalesChannel = (bill) =>
+  BILL_SALES_CHANNELS.some((channel) => channel.id === bill?.sales_channel)
+    ? bill.sales_channel
+    : 'shop_pos';
+const getBillSalesChannelLabel = (bill) =>
+  BILL_SALES_CHANNELS.find((channel) => channel.id === getBillSalesChannel(bill))?.label ||
+  'Shop POS';
+const isPlatformSale = (bill) =>
+  bill?.payment_method === 'Online' || getBillSalesChannel(bill) !== 'shop_pos';
 const isItemDisplayed = (item) => item?.is_displayed !== false;
 const isItemAvailableAtShop = (item, shopId) =>
   !shopId ||
@@ -299,11 +312,11 @@ export default function App() {
   const [printReportCategoryFilter, setPrintReportCategoryFilter] = useState('ALL');
   const [editingOrder, setEditingOrder] = useState(null);
   const [isSavingOrderEdit, setIsSavingOrderEdit] = useState(false);
-  const [previewOrderImageUrl, setPreviewOrderImageUrl] = useState('');
 
   // Sales POS Cart State
   const [cart, setCart] = useState([]);
   const [isMobileCartOpen, setIsMobileCartOpen] = useState(false);
+  const [salesChannel, setSalesChannel] = useState('shop_pos');
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [splitCashAmount, setSplitCashAmount] = useState('');
   const [splitUpiAmount, setSplitUpiAmount] = useState('');
@@ -316,7 +329,6 @@ export default function App() {
   const [newItemName, setNewItemName] = useState('');
   const [newItemCategory, setNewItemCategory] = useState('');
   const [newItemSubcategory, setNewItemSubcategory] = useState('');
-  const [newItemImageUrl, setNewItemImageUrl] = useState('');
   const [newItemPrice, setNewItemPrice] = useState('');
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newSubcategoryParentId, setNewSubcategoryParentId] = useState('');
@@ -343,13 +355,11 @@ export default function App() {
   });
   const [billSearchQuery, setBillSearchQuery] = useState('');
   const [billPaymentFilter, setBillPaymentFilter] = useState('ALL');
+  const [billSalesChannelFilter, setBillSalesChannelFilter] = useState('ALL');
   const [billShopFilter, setBillShopFilter] = useState('ALL');
   const [editingBillDateId, setEditingBillDateId] = useState(null);
   const [billDateDraft, setBillDateDraft] = useState('');
   const [processingBillAction, setProcessingBillAction] = useState(null);
-
-  // Public folder logo fallback flag (/logo.png)
-  const [logoLoadFailed, setLogoLoadFailed] = useState(false);
 
   // UI Feedback State
   const [toast, setToast] = useState(null);
@@ -408,27 +418,80 @@ export default function App() {
       return;
     }
     try {
-      const coreDataPromise = Promise.all([
-        supabase.request('categories?select=*&order=name.asc'),
-        supabase.request('items?select=*&order=name.asc'),
-        supabase.request('bills?select=*&order=created_at.desc&limit=500'),
-        supabase.request('bill_items?select=*&order=created_at.desc&limit=2500')
-      ]);
+      const categoriesPromise = supabase.request('categories?select=*&order=name.asc');
+      const itemsPromise = supabase.request(
+        'items?select=id,name,category_id,subcategory_id,price,stock,is_displayed,available_shop_ids,updated_at&order=name.asc'
+      );
+      const billsPromise = supabase.request('bills?select=*&order=created_at.desc&limit=500');
+      const billItemsPromise = supabase.request(
+        'bill_items?select=*&order=created_at.desc&limit=2500'
+      );
 
       const subcategoriesPromise = supabase
         .request('subcategories?select=*&order=name.asc')
         .catch(() => null);
-      const shopDataPromise = Promise.all([
-        supabase.request('shops?select=*&order=name.asc'),
-        supabase.request('shop_stocks?select=*'),
-        supabase.request('shop_category_expenses?select=*'),
-        supabase.request('app_users?select=*&order=created_at.asc')
-      ]).catch(() => null);
+      const shopsPromise = supabase.request('shops?select=*&order=name.asc').catch(() => null);
+      const shopStocksPath =
+        currentLoggedInUser?.role === 'shop-admin' && currentLoggedInUser.shop_id
+          ? `shop_stocks?select=*&shop_id=eq.${encodeURIComponent(currentLoggedInUser.shop_id)}`
+          : 'shop_stocks?select=*';
+      const shopStocksPromise = supabase.request(shopStocksPath).catch(() => null);
+      const isCurrentUserShopAdmin = currentLoggedInUser?.role === 'shop-admin';
+      if (isCurrentUserShopAdmin) {
+        shopsPromise.then((data) => setShops(data || []));
+      }
+      const shopCategoryExpensesPromise = supabase
+        .request('shop_category_expenses?select=*')
+        .catch(() => null);
+      const usersPromise = supabase
+        .request('app_users?select=*&order=created_at.asc')
+        .catch(() => null);
       const ordersPromise = supabase
-        .request('orders?select=*&order=order_date.asc,created_at.desc')
+        .request(
+          'orders?select=id,order_ref,order_type,customer_name,contact_phone,order_date,order_time,cake_flavor,cake_size,theme_specs,wishes_on_cake,total_amount,advance_paid,balance_due,status,shop_id,advance_bill_id,created_at&order=order_date.asc,created_at.desc'
+        )
         .catch(() => null);
 
-      const [catsData, itemsData, billsData, billItemsData] = await coreDataPromise;
+      const [catsData, itemsData, shopsData, shopStocksData] = await Promise.all([
+        categoriesPromise,
+        itemsPromise,
+        isCurrentUserShopAdmin ? Promise.resolve(null) : shopsPromise,
+        shopStocksPromise
+      ]);
+      setCategories(catsData || []);
+      setItems(itemsData || []);
+      setShops(shopsData || []);
+      setShopStocks(shopStocksData || []);
+      setIsLiveSupabase(true);
+
+      if (!itemsData || itemsData.length === 0) {
+        setCart([]);
+        setLatestGeneratedBill(null);
+        setAssignItemId('');
+      }
+
+      if (!isCurrentUserShopAdmin && (!shopsData || shopsData.length === 0)) {
+        setActiveShopId('');
+        setAssignShopId('');
+        setNewUserShopId('');
+        setExpenseConfigShopId('');
+      }
+
+      const [
+        billsData,
+        billItemsData,
+        subcatsData,
+        shopCatExpData,
+        usersData,
+        ordersData
+      ] = await Promise.all([
+        billsPromise,
+        billItemsPromise,
+        subcategoriesPromise,
+        shopCategoryExpensesPromise,
+        usersPromise,
+        ordersPromise
+      ]);
       const billItemsByBillId = new Map();
       (billItemsData || []).forEach((billItem) => {
         const billItems = billItemsByBillId.get(billItem.bill_id);
@@ -443,74 +506,41 @@ export default function App() {
         items: billItemsByBillId.get(b.id) || []
       }));
 
-      setCategories(catsData || []);
-      setItems(itemsData || []);
       setBills(billsWithItems);
-      setIsLiveSupabase(true);
-
-      if (!itemsData || itemsData.length === 0) {
-        setCart([]);
-        setLatestGeneratedBill(null);
-        setAssignItemId('');
-      }
-
-      const [subcatsData, shopData, ordersData] = await Promise.all([
-        subcategoriesPromise,
-        shopDataPromise,
-        ordersPromise
-      ]);
       setSubcategories(subcatsData || []);
+      setShopCategoryExpenses(shopCatExpData || []);
+      setDbUsers(usersData || []);
 
-      if (shopData) {
-        const [shopsData, shopStocksData, shopCatExpData, usersData] = shopData;
-        setShops(shopsData || []);
-        setShopStocks(shopStocksData || []);
-        setShopCategoryExpenses(shopCatExpData || []);
-        setDbUsers(usersData || []);
-
-        if (currentLoggedInUser) {
-          const refreshedUser = (usersData || []).find(
-            (user) => String(user.id) === String(currentLoggedInUser.id)
+      if (currentLoggedInUser) {
+        const refreshedUser = (usersData || []).find(
+          (user) => String(user.id) === String(currentLoggedInUser.id)
+        );
+        const userChanged =
+          refreshedUser &&
+          Object.keys(refreshedUser).some(
+            (key) => refreshedUser[key] !== currentLoggedInUser[key]
           );
-          const userChanged =
-            refreshedUser &&
-            Object.keys(refreshedUser).some(
-              (key) => refreshedUser[key] !== currentLoggedInUser[key]
-            );
 
-          if (userChanged) {
-            setCurrentLoggedInUser(refreshedUser);
-            if (refreshedUser.shop_id && refreshedUser.shop_id !== currentLoggedInUser.shop_id) {
-              setActiveShopId(refreshedUser.shop_id);
-            }
-            const activeSession = loadActiveSession();
-            if (activeSession) {
-              try {
-                localStorage.setItem(
-                  AUTH_SESSION_STORAGE_KEY,
-                  JSON.stringify({
-                    user: refreshedUser,
-                    expiresAt: activeSession.expiresAt
-                  })
-                );
-              } catch {
-                // Ignore storage quota errors
-              }
+        if (userChanged) {
+          setCurrentLoggedInUser(refreshedUser);
+          if (refreshedUser.shop_id && refreshedUser.shop_id !== currentLoggedInUser.shop_id) {
+            setActiveShopId(refreshedUser.shop_id);
+          }
+          const activeSession = loadActiveSession();
+          if (activeSession) {
+            try {
+              localStorage.setItem(
+                AUTH_SESSION_STORAGE_KEY,
+                JSON.stringify({
+                  user: refreshedUser,
+                  expiresAt: activeSession.expiresAt
+                })
+              );
+            } catch {
+              // Ignore storage quota errors
             }
           }
         }
-
-        if (!shopsData || shopsData.length === 0) {
-          setActiveShopId('');
-          setAssignShopId('');
-          setNewUserShopId('');
-          setExpenseConfigShopId('');
-        }
-      } else {
-        setShops([]);
-        setShopStocks([]);
-        setShopCategoryExpenses([]);
-        setDbUsers([]);
       }
 
       if (ordersData !== null) {
@@ -544,11 +574,18 @@ export default function App() {
 
   const syncFromSupabaseRef = useRef(syncFromSupabase);
   syncFromSupabaseRef.current = syncFromSupabase;
+  const hasSyncedForAuthSessionRef = useRef(false);
 
-  const previousAdminAuthRef = useRef(isAdminAuthenticated);
   useEffect(() => {
+    if (!isAdminAuthenticated) {
+      hasSyncedForAuthSessionRef.current = false;
+      return;
+    }
     if (!supabase.isConfigured()) return;
-    syncFromSupabaseRef.current(true);
+    if (!hasSyncedForAuthSessionRef.current) {
+      hasSyncedForAuthSessionRef.current = true;
+      syncFromSupabaseRef.current(true);
+    }
 
     const handleFocusOrVisible = () => {
       if (document.visibilityState === 'visible') {
@@ -570,14 +607,6 @@ export default function App() {
       document.removeEventListener('visibilitychange', handleFocusOrVisible);
       clearInterval(pollInterval);
     };
-  }, [supabase]);
-
-  useEffect(() => {
-    if (previousAdminAuthRef.current === isAdminAuthenticated) return;
-    previousAdminAuthRef.current = isAdminAuthenticated;
-    if (supabase.isConfigured() && isAdminAuthenticated) {
-      syncFromSupabase(true);
-    }
   }, [isAdminAuthenticated, supabase]);
 
   useEffect(() => {
@@ -1430,15 +1459,20 @@ export default function App() {
   const shopCatalogItems = useMemo(() => {
     const displayedItems = items.filter(isItemDisplayed);
     if (!activeShopId) return displayedItems;
+    const stockByItemId = new Map(
+      shopStocks
+        .filter((stock) => stock.shop_id === activeShopId)
+        .map((stock) => [stock.item_id, stock])
+    );
     return displayedItems
       .filter((it) => isItemAvailableAtShop(it, activeShopId))
       .map((it) => {
-      const alloc = shopStocks.find((ss) => ss.shop_id === activeShopId && ss.item_id === it.id);
-      return {
-        ...it,
-        stock: alloc ? Number(alloc.stock) : 0,
-        shop_stock_id: alloc?.id || null
-      };
+        const alloc = stockByItemId.get(it.id);
+        return {
+          ...it,
+          stock: alloc ? Number(alloc.stock) : 0,
+          shop_stock_id: alloc?.id || null
+        };
       });
   }, [items, shopStocks, activeShopId]);
 
@@ -1557,11 +1591,14 @@ export default function App() {
     const totalAmount = cartSubtotal;
     const targetShopId = activeShopId || null;
 
-    let finalPaymentMethod = paymentMethod;
-    let cashAmount = paymentMethod === 'Cash' ? Number(totalAmount.toFixed(2)) : 0;
-    let upiAmount = paymentMethod === 'UPI' ? Number(totalAmount.toFixed(2)) : 0;
+    const isOnlineSale = salesChannel !== 'shop_pos';
+    let finalPaymentMethod = isOnlineSale ? 'Online' : paymentMethod;
+    let cashAmount =
+      !isOnlineSale && paymentMethod === 'Cash' ? Number(totalAmount.toFixed(2)) : 0;
+    let upiAmount =
+      !isOnlineSale && paymentMethod === 'UPI' ? Number(totalAmount.toFixed(2)) : 0;
 
-    if (paymentMethod === 'Split') {
+    if (!isOnlineSale && paymentMethod === 'Split') {
       const cashAmt = parseFloat(splitCashAmount);
       const upiAmt = parseFloat(splitUpiAmount);
       if (
@@ -1590,7 +1627,6 @@ export default function App() {
         item_name: entry.item.name,
         category_name: cat ? cat.name : 'Uncategorized',
         subcategory_name: subcat ? subcat.name : '',
-        image_url: entry.item.image_url || '',
         quantity: entry.quantity,
         unit_price: Number(entry.item.price),
         subtotal: Number(entry.item.price) * entry.quantity
@@ -1606,6 +1642,7 @@ export default function App() {
             bill_number: billNumber,
             total_amount: totalAmount,
             payment_method: finalPaymentMethod,
+            sales_channel: salesChannel,
             cash_amount: cashAmount,
             upi_amount: upiAmount,
             shop_id: targetShopId,
@@ -1616,8 +1653,8 @@ export default function App() {
         await supabase.request('bill_items', {
           method: 'POST',
           body: JSON.stringify(
-            lineItemsPayload.map(({ image_url, ...dbFields }) => ({
-              ...dbFields,
+            lineItemsPayload.map((lineItem) => ({
+              ...lineItem,
               bill_id: insertedBill.id,
               created_at: timestamp
             }))
@@ -1667,6 +1704,7 @@ export default function App() {
         setLatestGeneratedBill({
           ...insertedBill,
           payment_method: finalPaymentMethod,
+          sales_channel: salesChannel,
           cash_amount: cashAmount,
           upi_amount: upiAmount,
           shop_id: targetShopId,
@@ -1678,6 +1716,7 @@ export default function App() {
           bill_number: billNumber,
           total_amount: totalAmount,
           payment_method: finalPaymentMethod,
+          sales_channel: salesChannel,
           cash_amount: cashAmount,
           upi_amount: upiAmount,
           shop_id: targetShopId,
@@ -1708,6 +1747,7 @@ export default function App() {
       setCart([]);
       setSplitCashAmount('');
       setSplitUpiAmount('');
+      setSalesChannel('shop_pos');
       showToast(`Bill ${billNumber} successfully created!`);
     } catch (err) {
       console.error(err);
@@ -1835,19 +1875,16 @@ export default function App() {
     }
   };
 
-  const handleOrderDesignImageUpload = async (e, isEditModal = false) => {
-    const file = e.target.files?.[0];
+  const handleOrderDesignImageUpload = async (event) => {
+    const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await compressImageToDataUrl(file, 480);
-      if (isEditModal) {
-        setEditingOrder((prev) => (prev ? { ...prev, design_image_url: dataUrl } : prev));
-      } else {
-        setOrderDesignImageUrl(dataUrl);
-      }
-      showToast('Design reference image attached!');
-    } catch {
+      setOrderDesignImageUrl(await compressImageToDataUrl(file));
+    } catch (err) {
+      console.error('Unable to process order design image.', err);
       showToast(COMMON_ERROR_MESSAGE, 'error');
+    } finally {
+      event.target.value = '';
     }
   };
 
@@ -2128,7 +2165,6 @@ export default function App() {
       cake_flavor: cleanFlavor,
       cake_size: cleanSize,
       theme_specs: editingOrder.order_type === 'Theme' ? (editingOrder.theme_specs || '').trim() : null,
-      design_image_url: editingOrder.order_type === 'Theme' ? editingOrder.design_image_url || null : null,
       wishes_on_cake: (editingOrder.wishes_on_cake || '').trim() || null,
       total_amount: Number(totalAmt.toFixed(2)),
       advance_paid: Number(advAmt.toFixed(2)),
@@ -2423,18 +2459,6 @@ export default function App() {
   // ============================================================================
   // SHARED CATALOG OPERATIONS (CATEGORY -> FLAVOUR -> TYPE / PRODUCT)
   // ============================================================================
-  const handleNewItemImageUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const dataUrl = await compressImageToDataUrl(file);
-      setNewItemImageUrl(dataUrl);
-      showToast('Product image uploaded & optimized!');
-    } catch {
-      showToast(COMMON_ERROR_MESSAGE, 'error');
-    }
-  };
-
   const handleCreateItem = async (e) => {
     e.preventDefault();
     if (!isSuperAdmin) {
@@ -2469,7 +2493,6 @@ export default function App() {
             name: newItemName.trim(),
             category_id: newItemCategory,
             subcategory_id: validSubcatId,
-            image_url: newItemImageUrl.trim(),
             price,
             stock: 0,
             is_displayed: true,
@@ -2483,7 +2506,6 @@ export default function App() {
           name: newItemName.trim(),
           category_id: newItemCategory,
           subcategory_id: validSubcatId,
-          image_url: newItemImageUrl.trim(),
           price,
           stock: 0,
           is_displayed: true,
@@ -2494,7 +2516,6 @@ export default function App() {
 
       setNewItemName('');
       setNewItemSubcategory('');
-      setNewItemImageUrl('');
       setNewItemPrice('');
       showToast('New item added to menu successfully!');
     } catch (err) {
@@ -2554,7 +2575,6 @@ export default function App() {
     newPrice,
     newCategoryId,
     newSubcategoryId,
-    newImageUrl,
     newTypeName,
     isDisplayed,
     availableShopIds,
@@ -2590,7 +2610,6 @@ export default function App() {
             price: parsedPrice,
             category_id: finalCategoryId,
             subcategory_id: cleanSubcatId,
-            image_url: newImageUrl ?? '',
             is_displayed: finalIsDisplayed,
             available_shop_ids: finalAvailableShopIds,
             updated_at: new Date().toISOString()
@@ -2607,7 +2626,6 @@ export default function App() {
                   price: parsedPrice,
                   category_id: finalCategoryId,
                   subcategory_id: cleanSubcatId,
-                  image_url: newImageUrl ?? it.image_url,
                   is_displayed: finalIsDisplayed,
                   available_shop_ids: finalAvailableShopIds
                 }
@@ -2666,7 +2684,6 @@ export default function App() {
           draft.price,
           draft.categoryId,
           draft.categoryId === item.category_id ? item.subcategory_id : null,
-          draft.imageUrl,
           draft.typeName,
           draft.isDisplayed,
           savedShopIds,
@@ -3052,6 +3069,7 @@ export default function App() {
     const total = Number(bill.total_amount) || 0;
     const cash = Number(bill.cash_amount) || 0;
     const upi = Number(bill.upi_amount) || 0;
+    if (isPlatformSale(bill)) return { cash: 0, upi: 0 };
     if (cash > 0 || upi > 0) return { cash, upi };
     if ((bill.payment_method || 'Cash') === 'UPI') return { cash: 0, upi: total };
     return { cash: total, upi: 0 };
@@ -3101,6 +3119,20 @@ export default function App() {
         return bill.shop_id === effectiveAnalyticsShopId;
       }
       return true;
+    });
+
+    const channelRows = BILL_SALES_CHANNELS.map((channel) => {
+      const channelBills = filteredBills.filter(
+        (bill) => getBillSalesChannel(bill) === channel.id
+      );
+      return {
+        ...channel,
+        billCount: channelBills.length,
+        totalSales: channelBills.reduce(
+          (sum, bill) => sum + (Number(bill.total_amount) || 0),
+          0
+        )
+      };
     });
 
     const categoryStatsMap = {};
@@ -3213,6 +3245,7 @@ export default function App() {
 
     return {
       filteredBills,
+      channelRows,
       categoryRows,
       shopRows,
       allShopsCombinedSales,
@@ -3755,6 +3788,12 @@ export default function App() {
       if (isAdmin && billShopFilter !== 'ALL' && bill.shop_id !== billShopFilter) {
         return false;
       }
+      if (
+        billSalesChannelFilter !== 'ALL' &&
+        getBillSalesChannel(bill) !== billSalesChannelFilter
+      ) {
+        return false;
+      }
 
       // Selected Date Filter (YYYY-MM-DD in local time)
       if (billDateFilter) {
@@ -3792,6 +3831,7 @@ export default function App() {
     billDateFilter,
     billSearchQuery,
     billPaymentFilter,
+    billSalesChannelFilter,
     billShopFilter,
     isAdmin,
     isShopAdmin,
@@ -3805,9 +3845,12 @@ export default function App() {
         acc.total += Number(bill.total_amount) || 0;
         acc.cash += cash;
         acc.upi += upi;
+        if (isPlatformSale(bill)) {
+          acc.online += Number(bill.total_amount) || 0;
+        }
         return acc;
       },
-      { total: 0, cash: 0, upi: 0 }
+      { total: 0, cash: 0, upi: 0, online: 0 }
     );
   }, [visibleLedgerBills]);
 
@@ -3836,19 +3879,8 @@ export default function App() {
 
         <div className="w-full max-w-md bg-white border border-purple-200/80 rounded-3xl shadow-xl shadow-purple-950/5 p-8 space-y-6">
           <div className="text-center space-y-2">
-            <div className="w-24 h-24 rounded-full flex items-center justify-center mx-auto overflow-hidden">
-              {!logoLoadFailed ? (
-                <img
-                  src="/logo.png"
-                  alt="Olive Cakes Logo"
-                  onError={() => setLogoLoadFailed(true)}
-                  className="w-full h-full object-contain rounded-full"
-                />
-              ) : (
-                <div className="w-20 h-20 rounded-full bg-purple-700 text-white flex items-center justify-center text-2xl font-extrabold">
-                  OC
-                </div>
-              )}
+            <div className="w-20 h-20 rounded-full flex items-center justify-center mx-auto overflow-hidden">
+              <img src="/logo.png" alt="Olive Cakes Logo" className="w-full h-full object-contain" />
             </div>
             <h1 className="text-2xl font-extrabold tracking-tight text-purple-950">
               OLIVE CAKES POS
@@ -4141,7 +4173,7 @@ export default function App() {
                     className="w-full bg-[#FAF8F5] border border-purple-100 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-purple-500 focus:bg-white transition-colors"
                   />
 
-                  {/* Instant Search Results Dropdown (In-Stock Items Only with Small Images) */}
+                  {/* Instant Search Results Dropdown */}
                   {searchQuery.trim().length > 0 && (
                     <div className="absolute left-0 right-0 top-full mt-1.5 z-20 bg-white border border-purple-200 rounded-xl shadow-xl max-h-72 overflow-y-auto divide-y divide-purple-50">
                       {visiblePosItems.length === 0 ? (
@@ -4163,17 +4195,9 @@ export default function App() {
                               className="w-full flex items-center justify-between gap-3 px-3.5 py-2.5 text-left transition-colors hover:bg-purple-50 cursor-pointer"
                             >
                               <div className="flex items-center gap-3 min-w-0">
-                                {item.image_url ? (
-                                  <img
-                                    src={item.image_url}
-                                    alt={item.name}
-                                    className="w-11 h-11 rounded-full object-cover border border-purple-200 shrink-0"
-                                  />
-                                ) : (
-                                  <div className="w-11 h-11 rounded-full bg-purple-100/70 text-purple-600 flex items-center justify-center shrink-0">
-                                    <Package className="w-5 h-5" />
-                                  </div>
-                                )}
+                                <div className="w-11 h-11 rounded-full bg-purple-100/70 text-purple-600 flex items-center justify-center shrink-0">
+                                  <Package className="w-5 h-5" />
+                                </div>
                                 <div className="min-w-0">
                                   <p className="text-sm font-bold text-slate-900 truncate">
                                     {item.name}
@@ -4309,7 +4333,7 @@ export default function App() {
               )}
             </div>
 
-            {/* Product Grid (User-Friendly Compact Cards with Round Image Inside Container) */}
+            {/* Product Grid */}
             {visiblePosItems.length === 0 ? (
               <div className="bg-white border border-dashed border-purple-200 rounded-2xl p-10 text-center">
                 <Package className="w-10 h-10 text-purple-300 mx-auto mb-2" />
@@ -4333,18 +4357,9 @@ export default function App() {
                     >
                       <div className="p-2.5 pb-2 sm:p-3.5 sm:pb-2.5">
                         <div className="flex items-start gap-2 sm:gap-3">
-                          {/* Round Image Inside Container */}
-                          {item.image_url ? (
-                            <img
-                              src={item.image_url}
-                              alt={item.name}
-                              className="w-10 h-10 sm:w-14 sm:h-14 rounded-full object-cover border border-purple-200 shrink-0 group-hover:scale-105 transition-transform duration-200"
-                            />
-                          ) : (
-                            <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-full bg-purple-100/70 border border-purple-200/70 text-purple-600 flex items-center justify-center shrink-0">
-                              <Package className="w-5 h-5 sm:w-6 sm:h-6" />
-                            </div>
-                          )}
+                          <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-full bg-purple-100/70 border border-purple-200/70 text-purple-600 flex items-center justify-center shrink-0">
+                            <Package className="w-5 h-5 sm:w-6 sm:h-6" />
+                          </div>
 
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-1.5 mb-1">
@@ -4446,7 +4461,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Cart Items List with Thumbnail Images, Direct Quantity Edit & Delete */}
+              {/* Cart Items List with Direct Quantity Edit & Delete */}
               <div className="py-4 space-y-3 max-h-[360px] overflow-y-auto">
                 {cart.length === 0 ? (
                   <div className="text-center py-10 px-4 bg-[#FAF8F5] rounded-xl border border-dashed border-purple-200">
@@ -4464,17 +4479,9 @@ export default function App() {
                         key={item.id}
                         className="flex items-center justify-between gap-3 bg-[#FAF8F5] border border-purple-100 rounded-xl p-3"
                       >
-                        {item.image_url ? (
-                          <img
-                            src={item.image_url}
-                            alt={item.name}
-                            className="w-14 h-14 rounded-full object-cover border border-purple-200 shrink-0"
-                          />
-                        ) : (
-                          <div className="w-14 h-14 rounded-full bg-purple-100/70 text-purple-500 flex items-center justify-center shrink-0">
-                            <Package className="w-6 h-6" />
-                          </div>
-                        )}
+                        <div className="w-14 h-14 rounded-full bg-purple-100/70 text-purple-500 flex items-center justify-center shrink-0">
+                          <Package className="w-6 h-6" />
+                        </div>
 
                         <div className="min-w-0 flex-1">
                           <h4 className="text-sm sm:text-base font-bold text-slate-900 truncate">
@@ -4547,7 +4554,36 @@ export default function App() {
                   </div>
                 </div>
 
+                <div className="bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2 space-y-2">
+                  <span className="block text-xs font-semibold text-slate-600">
+                    Sale Channel
+                  </span>
+                  <div className="grid grid-cols-3 gap-1 rounded-lg bg-white p-1 border border-purple-200/80">
+                    {BILL_SALES_CHANNELS.map((channel) => (
+                      <button
+                        key={channel.id}
+                        type="button"
+                        aria-pressed={salesChannel === channel.id}
+                        onClick={() => setSalesChannel(channel.id)}
+                        className={`min-h-10 rounded-md px-2 py-1 text-xs font-semibold transition-colors ${
+                          salesChannel === channel.id
+                            ? 'bg-purple-700 text-white shadow-xs'
+                            : 'text-slate-600 hover:bg-purple-50 hover:text-purple-900'
+                        }`}
+                      >
+                        {channel.label}
+                      </button>
+                    ))}
+                  </div>
+                  {salesChannel !== 'shop_pos' && (
+                    <p className="text-[11px] text-slate-500">
+                      Payment is handled by {getBillSalesChannelLabel({ sales_channel: salesChannel })}; no payment details are needed here.
+                    </p>
+                  )}
+                </div>
+
                 {/* Compact Pill Payment Method Selector: Cash, UPI, or Split */}
+                {salesChannel === 'shop_pos' && (
                 <div className="bg-[#FAF8F5] border border-purple-100 rounded-xl px-3 py-2 space-y-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-semibold text-slate-600">
@@ -4663,6 +4699,7 @@ export default function App() {
                     </div>
                   )}
                 </div>
+                )}
 
                 <button
                   onClick={handleGenerateBill}
@@ -4678,7 +4715,13 @@ export default function App() {
                     <>
                       <CheckCircle2 className="w-5 h-5" />
                       <span>
-                        Generate Live Bill ({paymentMethod === 'Split' ? 'Cash + UPI' : paymentMethod})
+                        Generate Live Bill (
+                        {salesChannel === 'shop_pos'
+                          ? paymentMethod === 'Split'
+                            ? 'Cash + UPI'
+                            : paymentMethod
+                          : getBillSalesChannelLabel({ sales_channel: salesChannel })}
+                        )
                       </span>
                     </>
                   )}
@@ -4707,10 +4750,18 @@ export default function App() {
                     </span>
                   </div>
                   <div className="flex items-center justify-between gap-2">
+                    <span>Sales Channel:</span>
+                    <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-900 font-semibold">
+                      {getBillSalesChannelLabel(latestGeneratedBill)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
                     <span>Payment Mode:</span>
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-100 text-purple-900 font-semibold">
                       {latestGeneratedBill.payment_method?.startsWith('Split') ? (
                         <ArrowRightLeft className="w-3 h-3 shrink-0" />
+                      ) : latestGeneratedBill.payment_method === 'Online' ? (
+                        <Globe className="w-3 h-3 shrink-0" />
                       ) : latestGeneratedBill.payment_method === 'UPI' ? (
                         <QrCode className="w-3 h-3 shrink-0" />
                       ) : (
@@ -4726,20 +4777,11 @@ export default function App() {
                 <div className="space-y-2.5 mb-3 max-h-48 overflow-y-auto">
                   {latestGeneratedBill.items?.map((li, idx) => (
                     <div key={idx} className="flex items-center justify-between gap-2.5 text-sm text-slate-700">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        {li.image_url && (
-                          <img
-                            src={li.image_url}
-                            alt={li.item_name}
-                            className="w-10 h-10 rounded-full object-cover border border-purple-200 shrink-0"
-                          />
-                        )}
-                        <span className="truncate">
-                          {li.item_name}
-                          {li.subcategory_name ? ` (${li.subcategory_name})` : ''}{' '}
-                          <span className="text-slate-500 font-medium">×{li.quantity}</span>
-                        </span>
-                      </div>
+                      <span className="min-w-0 truncate">
+                        {li.item_name}
+                        {li.subcategory_name ? ` (${li.subcategory_name})` : ''}{' '}
+                        <span className="text-slate-500 font-medium">×{li.quantity}</span>
+                      </span>
                       <span className="font-bold shrink-0">₹{Number(li.subtotal).toFixed(2)}</span>
                     </div>
                   ))}
@@ -5062,60 +5104,50 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* CONDITIONAL: THEME DESIGN SPECIFICATIONS & REFERENCE IMAGE */}
+                {/* CONDITIONAL: THEME DESIGN SPECIFICATIONS */}
                 {orderTypeInput === 'Theme' && (
                   <div className="bg-purple-50/50 border border-purple-200 rounded-2xl p-3.5 space-y-3">
-                    <div>
-                      <label className="block text-xs font-bold uppercase tracking-wider text-purple-900 mb-1 flex items-center gap-1">
-                        <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                        Theme Design Specifications *
-                      </label>
-                      <textarea
-                        rows={3}
-                        required
-                        placeholder="Specify design, topper specifications, reference sketches, or theme guidelines..."
-                        value={orderThemeSpecsInput}
-                        onChange={(e) => setOrderThemeSpecsInput(e.target.value)}
-                        className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-purple-600"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-bold uppercase tracking-wider text-purple-900 mb-1.5">
-                        Attached Design Reference Image
+                    <label className="block text-xs font-bold uppercase tracking-wider text-purple-900 mb-1 flex items-center gap-1">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                      Theme Design Specifications *
+                    </label>
+                    <textarea
+                      rows={3}
+                      required
+                      placeholder="Specify design, topper specifications, or theme guidelines..."
+                      value={orderThemeSpecsInput}
+                      onChange={(e) => setOrderThemeSpecsInput(e.target.value)}
+                      className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-purple-600"
+                    />
+                    <div className="space-y-2">
+                      <label className="block text-xs font-semibold text-purple-900">
+                        Design Reference Image (Optional)
                       </label>
                       <div className="flex items-center gap-3">
-                        <label className="flex-1 flex flex-col items-center justify-center gap-1 px-4 py-3 rounded-xl bg-white border border-dashed border-purple-300 hover:border-purple-500 text-xs font-semibold text-purple-800 cursor-pointer transition-colors">
-                          <ImagePlus className="w-4 h-4 text-purple-600" />
+                        <label className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-dashed border-purple-300 bg-white px-3 py-2 text-xs font-semibold text-purple-800 hover:border-purple-500 cursor-pointer">
+                          <ImagePlus className="w-4 h-4" />
                           <span>{orderDesignImageUrl ? 'Change Image' : 'Attach Image'}</span>
                           <input
                             type="file"
                             accept="image/*"
-                            onChange={(e) => handleOrderDesignImageUpload(e, false)}
+                            onChange={handleOrderDesignImageUpload}
                             className="hidden"
                           />
                         </label>
-                        {orderDesignImageUrl ? (
-                          <div className="relative shrink-0">
+                        {orderDesignImageUrl && (
+                          <div className="flex items-center gap-2">
                             <img
                               src={orderDesignImageUrl}
-                              alt="Design Reference"
-                              onClick={() => setPreviewOrderImageUrl(orderDesignImageUrl)}
-                              className="w-16 h-16 rounded-xl object-cover border border-purple-200 cursor-pointer"
+                              alt="Order design reference"
+                              className="h-14 w-14 rounded-lg border border-purple-200 object-cover"
                             />
                             <button
                               type="button"
                               onClick={() => setOrderDesignImageUrl('')}
-                              title="Remove image"
-                              className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center shadow cursor-pointer"
+                              className="rounded-lg px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
                             >
-                              <X className="w-3 h-3" />
+                              Remove
                             </button>
-                          </div>
-                        ) : (
-                          <div className="w-16 h-16 rounded-xl border border-dashed border-slate-200 bg-white/70 flex flex-col items-center justify-center text-[10px] text-slate-400 shrink-0">
-                            <ImagePlus className="w-3.5 h-3.5 mb-0.5" />
-                            <span>No Image</span>
                           </div>
                         )}
                       </div>
@@ -5720,6 +5752,33 @@ export default function App() {
                 )}
               </div>
 
+              <div className="bg-white border border-purple-100 shadow-xs rounded-2xl p-5 space-y-3">
+                <div>
+                  <h3 className="font-bold text-purple-950 text-base">Sales by Channel</h3>
+                  <p className="text-xs text-slate-500">
+                    Totals for the selected date range and shop filter.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {analyticsData.channelRows.map((channel) => (
+                    <div
+                      key={channel.id}
+                      className="rounded-xl border border-purple-100 bg-[#FAF8F5] p-4"
+                    >
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                        {channel.label}
+                      </p>
+                      <p className="mt-1 text-xl font-extrabold text-purple-950">
+                        ₹{channel.totalSales.toFixed(2)}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {channel.billCount} {channel.billCount === 1 ? 'bill' : 'bills'}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               {/* Super Admin: Shop-Wise Sales & Total Combined Sales Summary Table */}
               {isAdmin && shops.length > 0 && (
                 <div className="bg-white border border-purple-100 shadow-xs rounded-2xl overflow-hidden">
@@ -6061,21 +6120,6 @@ export default function App() {
                                     <span className="font-bold">Design:</span> {order.theme_specs}
                                   </p>
                                 )}
-                                {order.design_image_url && (
-                                  <button
-                                    type="button"
-                                    onClick={() => setPreviewOrderImageUrl(order.design_image_url)}
-                                    className="mt-1.5 inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white border border-purple-200 hover:border-purple-400 text-[11px] font-semibold text-purple-800 cursor-pointer"
-                                  >
-                                    <img
-                                      src={order.design_image_url}
-                                      alt="Ref"
-                                      className="w-6 h-6 rounded object-cover"
-                                    />
-                                    <Eye className="w-3 h-3" />
-                                    <span>View Design</span>
-                                  </button>
-                                )}
                               </td>
 
                               <td data-label="Writing" className="py-3.5 px-4 max-w-[180px]">
@@ -6217,6 +6261,10 @@ export default function App() {
                     • UPI:{' '}
                     <strong className="text-purple-900">
                       ₹{ledgerPaymentTotals.upi.toFixed(2)}
+                    </strong>{' '}
+                    • Online:{' '}
+                    <strong className="text-purple-900">
+                      ₹{ledgerPaymentTotals.online.toFixed(2)}
                     </strong>
                   </p>
                 </div>
@@ -6255,7 +6303,7 @@ export default function App() {
                   </div>
 
                   <div className="inline-flex bg-[#FAF8F5] p-0.5 rounded-xl border border-purple-200">
-                    {['ALL', 'Cash', 'UPI', 'Split'].map((mode) => (
+                    {['ALL', 'Cash', 'UPI', 'Split', 'Online'].map((mode) => (
                       <button
                         key={mode}
                         type="button"
@@ -6270,6 +6318,20 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+
+                  <select
+                    aria-label="Filter by sales channel"
+                    value={billSalesChannelFilter}
+                    onChange={(e) => setBillSalesChannelFilter(e.target.value)}
+                    className="bg-[#FAF8F5] border border-purple-200 rounded-xl px-2.5 py-1.5 text-xs font-semibold text-purple-950 focus:outline-none focus:border-purple-600"
+                  >
+                    <option value="ALL">All Channels</option>
+                    {BILL_SALES_CHANNELS.map((channel) => (
+                      <option key={channel.id} value={channel.id}>
+                        {channel.label}
+                      </option>
+                    ))}
+                  </select>
 
                   {isAdmin && shops.length > 0 && (
                     <select
@@ -6286,12 +6348,16 @@ export default function App() {
                     </select>
                   )}
 
-                  {(billSearchQuery || billPaymentFilter !== 'ALL' || billShopFilter !== 'ALL') && (
+                  {(billSearchQuery ||
+                    billPaymentFilter !== 'ALL' ||
+                    billSalesChannelFilter !== 'ALL' ||
+                    billShopFilter !== 'ALL') && (
                     <button
                       type="button"
                       onClick={() => {
                         setBillSearchQuery('');
                         setBillPaymentFilter('ALL');
+                        setBillSalesChannelFilter('ALL');
                         setBillShopFilter('ALL');
                       }}
                       className="px-2.5 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-semibold cursor-pointer"
@@ -6328,9 +6394,14 @@ export default function App() {
                                 {billShop.name}
                               </span>
                             )}
+                            <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-100 text-emerald-900">
+                              {getBillSalesChannelLabel(bill)}
+                            </span>
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-purple-100 text-purple-800">
                               {bill.payment_method?.startsWith('Split') ? (
                                 <ArrowRightLeft className="w-3 h-3" />
+                              ) : bill.payment_method === 'Online' ? (
+                                <Globe className="w-3 h-3" />
                               ) : bill.payment_method === 'UPI' ? (
                                 <QrCode className="w-3 h-3" />
                               ) : (
@@ -7631,31 +7702,6 @@ export default function App() {
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Product Image (Optional)
-                    </label>
-                    <div className="flex items-center gap-3">
-                      <label className="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-[#FAF8F5] border border-dashed border-purple-300 hover:border-purple-500 text-xs font-semibold text-purple-800 cursor-pointer">
-                        <ImagePlus className="w-4 h-4" />
-                        <span>{newItemImageUrl ? 'Change Image' : 'Upload Photo'}</span>
-                        <input
-                          type="file"
-                          accept="image/*"
-                          onChange={handleNewItemImageUpload}
-                          className="hidden"
-                        />
-                      </label>
-                      {newItemImageUrl && (
-                        <img
-                          src={newItemImageUrl}
-                          alt="Preview"
-                          className="w-11 h-11 rounded-xl object-cover border border-purple-200"
-                        />
-                      )}
-                    </div>
-                  </div>
-
                   <button
                     type="submit"
                     disabled={categories.length === 0 || isCreatingItem}
@@ -7928,10 +7974,6 @@ export default function App() {
                                                   shops={shops}
                                                   isBilled={billedItemIds.has(it.id)}
                                                   typeCount={typeCount}
-                                                  compressImageToDataUrl={compressImageToDataUrl}
-                                                  onImageError={() =>
-                                                    showToast(COMMON_ERROR_MESSAGE, 'error')
-                                                  }
                                                   onDraftChange={handleMenuItemDraftChange}
                                                   onDeleteItem={handleDeleteCatalogItem}
                                                 />
@@ -8347,36 +8389,6 @@ export default function App() {
                       className="w-full bg-white border border-purple-200 rounded-xl px-3 py-2 text-sm text-slate-900 focus:outline-none focus:border-purple-600"
                     />
                   </div>
-                  <div className="flex items-center gap-3">
-                    <label className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-white border border-dashed border-purple-300 text-xs font-semibold text-purple-800 cursor-pointer">
-                      <ImagePlus className="w-4 h-4" />
-                      <span>{editingOrder.design_image_url ? 'Change Image' : 'Attach Image'}</span>
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={(e) => handleOrderDesignImageUpload(e, true)}
-                        className="hidden"
-                      />
-                    </label>
-                    {editingOrder.design_image_url && (
-                      <div className="relative">
-                        <img
-                          src={editingOrder.design_image_url}
-                          alt="Ref"
-                          className="w-12 h-12 rounded-lg object-cover border border-purple-200"
-                        />
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setEditingOrder((prev) => ({ ...prev, design_image_url: '' }))
-                          }
-                          className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-rose-600 text-white flex items-center justify-center cursor-pointer"
-                        >
-                          <X className="w-2.5 h-2.5" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
                 </div>
               )}
 
@@ -8456,31 +8468,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Design Reference Image Lightbox Modal */}
-      {previewOrderImageUrl && (
-        <div
-          onClick={() => setPreviewOrderImageUrl('')}
-          className="fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-[2px] flex items-center justify-center p-4 cursor-pointer"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="relative bg-white rounded-2xl p-3 max-w-lg w-full shadow-2xl"
-          >
-            <button
-              type="button"
-              onClick={() => setPreviewOrderImageUrl('')}
-              className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-purple-700 text-white flex items-center justify-center shadow-lg cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-            <img
-              src={previewOrderImageUrl}
-              alt="Cake Design Reference"
-              className="w-full max-h-[75vh] object-contain rounded-xl"
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

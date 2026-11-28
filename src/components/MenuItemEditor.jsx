@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ImagePlus, Trash2, X } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 
 function areShopIdsEqual(left = [], right = []) {
   return left.length === right.length && left.every((id) => right.includes(id));
@@ -11,15 +11,12 @@ export default function MenuItemEditor({
   shops = [],
   isBilled = false,
   typeCount = 0,
-  compressImageToDataUrl,
-  onImageError,
   onDraftChange,
   onDeleteItem
 }) {
   const [typeName, setTypeName] = useState(item.name);
   const [price, setPrice] = useState(item.price);
   const [categoryId, setCategoryId] = useState(item.category_id || '');
-  const [imageUrl, setImageUrl] = useState(item.image_url || '');
   const [isDisplayed, setIsDisplayed] = useState(item.is_displayed !== false);
   const [availableShopIds, setAvailableShopIds] = useState(
     () => item.available_shop_ids ?? shops.map((shop) => shop.id)
@@ -47,7 +44,6 @@ export default function MenuItemEditor({
   const isDirty =
     typeName.trim() !== item.name ||
     Number(price) !== Number(item.price) ||
-    imageUrl !== (item.image_url || '') ||
     isDisplayed !== (item.is_displayed !== false) ||
     !areShopIdsEqual(availableShopIds, currentAvailableShopIds) ||
     (!isBilled && categoryId !== (item.category_id || ''));
@@ -56,7 +52,6 @@ export default function MenuItemEditor({
     setTypeName(item.name);
     setPrice(item.price);
     setCategoryId(item.category_id || '');
-    setImageUrl(item.image_url || '');
     setIsDisplayed(item.is_displayed !== false);
     setAvailableShopIds(JSON.parse(currentAvailableShopIdsKey));
   }, [
@@ -64,7 +59,6 @@ export default function MenuItemEditor({
     item.name,
     item.price,
     item.category_id,
-    item.image_url,
     item.is_displayed,
     currentAvailableShopIdsKey
   ]);
@@ -76,7 +70,6 @@ export default function MenuItemEditor({
         ? {
             price,
             categoryId,
-            imageUrl,
             typeName,
             isDisplayed,
             availableShopIds
@@ -88,7 +81,6 @@ export default function MenuItemEditor({
     isDirty,
     price,
     categoryId,
-    imageUrl,
     typeName,
     isDisplayed,
     availableShopIds,
@@ -100,17 +92,6 @@ export default function MenuItemEditor({
     [item.id, onDraftChange]
   );
 
-  const handleImageChange = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const dataUrl = await compressImageToDataUrl(file);
-      setImageUrl(dataUrl);
-    } catch {
-      onImageError();
-    }
-  };
-
   const toggleShopAvailability = (shopId) => {
     setAvailableShopIds((current) =>
       current.includes(shopId)
@@ -121,30 +102,6 @@ export default function MenuItemEditor({
 
   return (
     <div className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1.5 bg-[#FAF8F5] border border-purple-200/80 rounded-lg px-2.5 py-1.5">
-      <div className="relative flex items-center">
-        <label
-          title={imageUrl ? 'Change item photo' : 'Upload item photo'}
-          className="w-8 h-8 rounded-lg border border-purple-200 bg-white hover:border-purple-500 flex items-center justify-center overflow-hidden cursor-pointer shrink-0"
-        >
-          {imageUrl ? (
-            <img src={imageUrl} alt={item.name} className="w-full h-full object-cover" />
-          ) : (
-            <ImagePlus className="w-3.5 h-3.5 text-purple-500" />
-          )}
-          <input type="file" accept="image/*" onChange={handleImageChange} className="hidden" />
-        </label>
-        {imageUrl && (
-          <button
-            type="button"
-            onClick={() => setImageUrl('')}
-            title="Remove photo"
-            className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-rose-600 text-white flex items-center justify-center cursor-pointer"
-          >
-            <X className="w-2.5 h-2.5" />
-          </button>
-        )}
-      </div>
-
       <input
         type="text"
         value={typeName}

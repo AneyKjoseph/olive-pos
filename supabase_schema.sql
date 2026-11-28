@@ -54,11 +54,13 @@ CREATE TABLE IF NOT EXISTS bills (
   bill_number TEXT UNIQUE NOT NULL,
   total_amount NUMERIC(10,2) NOT NULL,
   payment_method TEXT NOT NULL DEFAULT 'Cash' CHECK (payment_method IN ('Cash', 'UPI')),
+  sales_channel TEXT NOT NULL DEFAULT 'shop_pos',
   shop_id UUID REFERENCES shops(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS payment_method TEXT NOT NULL DEFAULT 'Cash';
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS sales_channel TEXT NOT NULL DEFAULT 'shop_pos';
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS shop_id UUID REFERENCES shops(id) ON DELETE SET NULL;
 
 -- 6. Bill Items Table (Stores Product Type, Category, and Flavour snapshot per bill line)
@@ -172,7 +174,17 @@ DROP CONSTRAINT IF EXISTS bills_payment_method_check;
 
 ALTER TABLE public.bills
 ADD CONSTRAINT bills_payment_method_check
-CHECK (payment_method IN ('Cash', 'UPI', 'Split'));
+CHECK (payment_method IN ('Cash', 'UPI', 'Split', 'Online'));
+
+ALTER TABLE public.bills
+ADD COLUMN IF NOT EXISTS sales_channel TEXT NOT NULL DEFAULT 'shop_pos';
+
+ALTER TABLE public.bills
+DROP CONSTRAINT IF EXISTS bills_sales_channel_check;
+
+ALTER TABLE public.bills
+ADD CONSTRAINT bills_sales_channel_check
+CHECK (sales_channel IN ('shop_pos', 'zomato', 'swiggy'));
 
 ALTER TABLE public.bills
 ADD COLUMN IF NOT EXISTS cash_amount NUMERIC(10, 2) NOT NULL DEFAULT 0,
