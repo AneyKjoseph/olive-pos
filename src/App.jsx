@@ -4356,38 +4356,32 @@ export default function App() {
                       className="group relative rounded-xl sm:rounded-2xl border overflow-hidden transition-all flex flex-col justify-between bg-white border-purple-100 hover:border-purple-400 hover:shadow-md hover:shadow-purple-900/5 cursor-pointer active:scale-[0.98]"
                     >
                       <div className="p-2.5 pb-2 sm:p-3.5 sm:pb-2.5">
-                        <div className="flex items-start gap-2 sm:gap-3">
-                          <div className="w-10 h-10 sm:w-14 sm:h-14 rounded-full bg-purple-100/70 border border-purple-200/70 text-purple-600 flex items-center justify-center shrink-0">
-                            <Package className="w-5 h-5 sm:w-6 sm:h-6" />
-                          </div>
-
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center justify-between gap-1.5 mb-1">
-                              <span className="min-w-0 text-[10px] sm:text-xs font-medium px-1.5 sm:px-2 py-0.5 rounded-md bg-[#FAF8F5] text-purple-800 border border-purple-100 truncate">
-                                {cat?.name || 'General'}
-                              </span>
-                              <span
-                                className={`text-[10px] sm:text-xs font-bold px-1.5 sm:px-2 py-0.5 rounded-full shrink-0 ${
-                                  item.stock <= 5
-                                    ? 'bg-amber-100 text-amber-800'
-                                    : 'bg-purple-100 text-purple-800'
-                                }`}
-                              >
-                                {item.stock} left
-                              </span>
-                            </div>
-                            <h3
-                              className="font-bold text-slate-900 text-xs sm:text-base leading-snug line-clamp-2 sm:truncate"
-                              title={item.name}
+                        <div className="min-w-0">
+                          <div className="flex items-center justify-between gap-1.5 mb-1">
+                            <span className="min-w-0 text-[10px] sm:text-xs font-medium px-1.5 sm:px-2 py-0.5 rounded-md bg-[#FAF8F5] text-purple-800 border border-purple-100 truncate">
+                              {cat?.name || 'General'}
+                            </span>
+                            <span
+                              className={`text-[10px] sm:text-xs font-bold px-1.5 sm:px-2 py-0.5 rounded-full shrink-0 ${
+                                item.stock <= 5
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-purple-100 text-purple-800'
+                              }`}
                             >
-                              {item.name}
-                            </h3>
-                            {subcat && (
-                              <p className="text-xs font-semibold text-purple-700 truncate mt-0.5">
-                                {subcat.name}
-                              </p>
-                            )}
+                              {item.stock} left
+                            </span>
                           </div>
+                          <h3
+                            className="font-bold text-slate-900 text-xs sm:text-base leading-snug line-clamp-2 sm:truncate"
+                            title={item.name}
+                          >
+                            {item.name}
+                          </h3>
+                          {subcat && (
+                            <p className="text-xs font-semibold text-purple-700 truncate mt-0.5">
+                              {subcat.name}
+                            </p>
+                          )}
                         </div>
                       </div>
 
@@ -4482,7 +4476,6 @@ export default function App() {
                         <div className="w-14 h-14 rounded-full bg-purple-100/70 text-purple-500 flex items-center justify-center shrink-0">
                           <Package className="w-6 h-6" />
                         </div>
-
                         <div className="min-w-0 flex-1">
                           <h4 className="text-sm sm:text-base font-bold text-slate-900 truncate">
                             {item.name}
